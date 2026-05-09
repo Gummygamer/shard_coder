@@ -299,8 +299,10 @@ class Agent:
 
             self._update_memory(task, outcome)
 
+            is_continuation = "-cont" in subtask.id
+            root_id = subtask.id.split("-cont", 1)[0]
+
             if outcome.continuation_subtask is not None:
-                root_id = subtask.id.split("-cont", 1)[0]
                 count = continuations_per_root.get(root_id, 0)
                 if count < MAX_CONTINUATIONS_PER_SUBTASK:
                     continuations_per_root[root_id] = count + 1
@@ -314,23 +316,68 @@ class Agent:
                     self._emit(msg)
 
             if outcome.no_patch_reason:
-                report.stop_reason = (
-                    f"NO_PATCH on subtask {subtask.id}: {outcome.no_patch_reason}"
-                )
-                warnings.append(report.stop_reason)
-                break
-
-            if self._subtask_hard_failed(outcome):
-                consecutive_failures += 1
-                if consecutive_failures >= 2:
+                if is_continuation and "complete" in outcome.no_patch_reason.lower():
+                    # Model says the file is done — treat as success.
+                    pass
+                elif is_continuation:
+                    # NO_PATCH for a non-completion reason; retry the continuation.
+                    count = continuations_per_root.get(root_id, 0)
+                    if count < MAX_CONTINUATIONS_PER_SUBTASK:
+                        retry = self._build_continuation_subtask(subtask, [])
+                        continuations_per_root[root_id] = count + 1
+                        queue.insert(0, retry)
+                        self._emit(
+                            f"[{subtask.id}] NO_PATCH on continuation; retrying as {retry.id}"
+                        )
+                    else:
+                        msg = (
+                            f"continuation limit ({MAX_CONTINUATIONS_PER_SUBTASK}) "
+                            f"reached for {root_id}; the file may still be incomplete"
+                        )
+                        warnings.append(msg)
+                        self._emit(msg)
+                else:
                     report.stop_reason = (
-                        f"two consecutive validation failures "
-                        f"(last: subtask {subtask.id})"
+                        f"NO_PATCH on subtask {subtask.id}: {outcome.no_patch_reason}"
                     )
                     warnings.append(report.stop_reason)
                     break
-            else:
-                consecutive_failures = 0
+
+            # Track consecutive hard-failures only for original subtasks.
+            # Continuation failures re-enqueue a retry rather than aborting.
+            if not is_continuation:
+                if self._subtask_hard_failed(outcome):
+                    consecutive_failures += 1
+                    if consecutive_failures >= 2:
+                        report.stop_reason = (
+                            f"two consecutive validation failures "
+                            f"(last: subtask {subtask.id})"
+                        )
+                        warnings.append(report.stop_reason)
+                        break
+                else:
+                    consecutive_failures = 0
+            elif (
+                outcome.continuation_subtask is None
+                and not outcome.no_patch_reason
+                and self._subtask_hard_failed(outcome)
+            ):
+                # Apply/validation failed for this continuation; retry it.
+                count = continuations_per_root.get(root_id, 0)
+                if count < MAX_CONTINUATIONS_PER_SUBTASK:
+                    retry = self._build_continuation_subtask(subtask, [])
+                    continuations_per_root[root_id] = count + 1
+                    queue.insert(0, retry)
+                    self._emit(
+                        f"[{subtask.id}] continuation hard-failed; retrying as {retry.id}"
+                    )
+                else:
+                    msg = (
+                        f"continuation limit ({MAX_CONTINUATIONS_PER_SUBTASK}) "
+                        f"reached for {root_id}; the file may still be incomplete"
+                    )
+                    warnings.append(msg)
+                    self._emit(msg)
 
         if max_subtasks is not None and len(plan.subtasks) > cap and not report.stop_reason:
             warnings.append(
@@ -633,11 +680,11 @@ class Agent:
         partial content; the goal text carries the continuation framing the
         model needs.
         """
-        new_paths = [
-            fd.target_path
-            for fd in diffs
-            if fd.is_new_file and not fd.is_deleted_file
-        ] or [fd.target_path for fd in diffs]
+        new_paths = (
+            [fd.target_path for fd in diffs if fd.is_new_file and not fd.is_deleted_file]
+            or [fd.target_path for fd in diffs]
+            or list(parent.likely_files)
+        )
 
         # Keep a continuation depth counter on the id so we can detect runaway
         # chains and avoid colliding ids in the report. T1 -> T1-cont1 -> T1-cont2 ...
