@@ -11,7 +11,7 @@ from rich.panel import Panel
 from rich.table import Table
 
 from .agent import Agent, AgentReport
-from .config import ConfigError, load_config
+from .config import ConfigError, find_config_file, load_config
 from .execution.runner import run_command, summarize_result
 from .llm.client import ChatMessage, LLMError
 from .llm.openai_compatible import OpenAICompatibleClient
@@ -133,6 +133,8 @@ def _build_agent(
     use_llm: bool = True,
 ) -> Agent:
     try:
+        if config_path is None:
+            config_path = find_config_file(repo.resolve())
         config = load_config(
             config_path=str(config_path) if config_path else None,
             cli_overrides=overrides,
