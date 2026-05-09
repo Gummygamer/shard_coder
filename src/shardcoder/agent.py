@@ -98,6 +98,7 @@ class Agent:
         llm: LLMClient | None = None,
         memory: SlidingMemory | None = None,
         db_path: str | Path | None = None,
+        log: Callable[[str], None] | None = None,
     ) -> None:
         self.repo_root = Path(repo_root).resolve()
         self.config = config or load_config()
@@ -106,16 +107,26 @@ class Agent:
         if db_path is None:
             db_path = self.repo_root / DEFAULT_DB_DIR / DEFAULT_DB_NAME
         self.store = SummaryStore(db_path)
+        self._log_fn = log
+
+    def _emit(self, msg: str) -> None:
+        if self._log_fn is not None:
+            self._log_fn(msg)
 
     # ------------------------------------------------------------------
     # LLM helpers
     # ------------------------------------------------------------------
 
     @classmethod
-    def with_default_llm(cls, repo_root: str | Path, config: ShardCoderConfig | None = None) -> "Agent":
+    def with_default_llm(
+        cls,
+        repo_root: str | Path,
+        config: ShardCoderConfig | None = None,
+        log: Callable[[str], None] | None = None,
+    ) -> "Agent":
         config = config or load_config()
         llm = OpenAICompatibleClient(config.llm)
-        return cls(repo_root, config=config, llm=llm)
+        return cls(repo_root, config=config, llm=llm, log=log)
 
     # ------------------------------------------------------------------
     # Indexing + summarisation
@@ -224,8 +235,10 @@ class Agent:
             return AgentReport(task=task, plan_used_fallback=False, warnings=warnings)
 
         # Always refresh the index before editing.
+        self._emit("Indexing repository...")
         self.index(only_changed=True)
 
+        self._emit("Planning subtasks...")
         planner_result = self.plan(task)
         plan = planner_result.plan
         if not plan.subtasks:
@@ -236,6 +249,11 @@ class Agent:
                 warnings=warnings,
             )
 
+        src = "fallback" if planner_result.fallback_used else "model"
+        self._emit(f"Plan ({src}): {len(plan.subtasks)} subtask(s)")
+        for st in plan.subtasks:
+            self._emit(f"  {st.id}: {st.goal}")
+
         report = AgentReport(
             task=task,
             plan_used_fallback=planner_result.fallback_used,
@@ -244,6 +262,7 @@ class Agent:
         cap = len(plan.subtasks) if max_subtasks is None else max(max_subtasks, 0)
         consecutive_failures = 0
         for subtask in plan.subtasks[:cap]:
+            self._emit(f"\n[{subtask.id}] Starting: {subtask.goal}")
             outcome = self.run_subtask(
                 subtask,
                 web=web,
@@ -341,6 +360,10 @@ class Agent:
 
         external_result: ExternalContextResult | None = None
         if web and (subtask.needs_external_docs or self.config.web.enabled):
+            self._emit(
+                f"[{subtask.id}] Fetching external docs"
+                + (f" — {subtask.external_doc_reason}" if subtask.external_doc_reason else "")
+            )
             external_result = retrieve_external_context(
                 subtask.goal,
                 reason=subtask.external_doc_reason or "task-supplied --web",
@@ -351,11 +374,21 @@ class Agent:
             )
             if external_result.error:
                 outcome.notes.append(f"external docs: {external_result.error}")
+                self._emit(f"[{subtask.id}] External docs error: {external_result.error}")
+            elif external_result.sources:
+                self._emit(f"[{subtask.id}] External docs: {', '.join(external_result.sources)}")
             outcome.used_external_docs = external_result.used and bool(
                 external_result.notes
             )
             outcome.external_sources = external_result.sources
 
+        queries = subtask.search_queries or queries_from_task(
+            subtask.goal, hint_tokens=subtask.likely_files
+        )
+        self._emit(
+            f"[{subtask.id}] Retrieving context — queries: {', '.join(queries[:4])}"
+            + (" ..." if len(queries) > 4 else "")
+        )
         context_pack = self._build_context_pack(
             subtask=subtask,
             failing_files=[],
@@ -363,6 +396,10 @@ class Agent:
             external=external_result,
         )
         outcome.context_pack = context_pack
+        self._emit(
+            f"[{subtask.id}] Context: {len(context_pack.snippets)} snippet(s), "
+            f"{len(context_pack.summaries)} summary/ies, {context_pack.used_tokens} tokens"
+        )
 
         validation_command = (
             subtask.validation or self.config.validation.test_command or ""
@@ -370,9 +407,17 @@ class Agent:
 
         for iteration in range(1, self.config.agent.max_iterations + 1):
             outcome.iterations = iteration
+            self._emit(f"[{subtask.id}] Iteration {iteration}: calling model for patch...")
             patch_text = self._ask_for_patch(subtask, context_pack, validation_command)
             outcome.patch_text = patch_text
 
+            if patch_text.lstrip().startswith("NO_PATCH"):
+                self._emit(f"[{subtask.id}] Iteration {iteration}: model returned NO_PATCH")
+            else:
+                nlines = patch_text.count("\n") + 1
+                self._emit(f"[{subtask.id}] Iteration {iteration}: model returned {nlines}-line diff")
+
+            self._emit(f"[{subtask.id}] Iteration {iteration}: validating patch...")
             validation_result = validate_model_output(
                 patch_text,
                 self.repo_root,
@@ -386,6 +431,10 @@ class Agent:
                 break
 
             if not validation_result.ok:
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: patch rejected — "
+                    + "; ".join(validation_result.errors)
+                )
                 outcome.notes.append(
                     f"iteration {iteration}: patch rejected — {'; '.join(validation_result.errors)}"
                 )
@@ -398,6 +447,11 @@ class Agent:
                 )
                 continue
 
+            target_files = [fd.target_path for fd in validation_result.diffs]
+            self._emit(
+                f"[{subtask.id}] Iteration {iteration}: applying patch"
+                + (f" → {', '.join(target_files)}" if target_files else "")
+            )
             apply_result = apply_validated_patch(
                 validation_result,
                 self.repo_root,
@@ -405,20 +459,35 @@ class Agent:
             )
             outcome.apply_result = apply_result
             if not apply_result.ok:
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: apply failed — "
+                    + "; ".join(apply_result.errors)
+                )
                 outcome.notes.append(
                     f"iteration {iteration}: apply failed — {'; '.join(apply_result.errors)}"
                 )
                 break
+
+            if apply_result.changed_files:
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: wrote "
+                    + ", ".join(apply_result.changed_files)
+                )
 
             if (
                 self.config.agent.auto_run_tests
                 and validation_command
                 and not self.config.agent.dry_run
             ):
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: running validation: {validation_command}"
+                )
                 cmd_result = self._run_validation(validation_command)
                 outcome.command_result = cmd_result
                 if cmd_result.ok:
+                    self._emit(f"[{subtask.id}] Iteration {iteration}: validation passed")
                     break
+                self._emit(f"[{subtask.id}] Iteration {iteration}: validation failed, preparing repair...")
                 # Build a focused failure context and retry.
                 failure_summary = summarize_result(
                     cmd_result, max_tokens=self.config.context.max_validation_tokens

@@ -48,7 +48,7 @@ def main(
     task = " ".join(prompt).strip() if prompt else ""
 
     if task:
-        agent = _build_agent(repo, config, overrides=overrides or None)
+        agent = _build_agent(repo, config, overrides=overrides or None, verbose=verbose)
         report = agent.run_edit(task, allow_dirty=allow_dirty)
         _render_report(report, verbose=verbose)
     else:
@@ -80,7 +80,7 @@ def _run_interactive(
     def _get_agent() -> Agent:
         nonlocal agent
         if agent is None:
-            agent = _build_agent(repo, config_path, overrides=overrides)
+            agent = _build_agent(repo, config_path, overrides=overrides, verbose=verbose)
         return agent
 
     while True:
@@ -126,11 +126,16 @@ def _run_interactive(
             console.print("\n[yellow]Interrupted.[/yellow]")
 
 
+def _verbose_log(msg: str) -> None:
+    console.print(f"[dim]{msg}[/dim]")
+
+
 def _build_agent(
     repo: Path,
     config_path: Optional[Path],
     overrides: dict | None = None,
     use_llm: bool = True,
+    verbose: bool = False,
 ) -> Agent:
     try:
         if config_path is None:
@@ -143,7 +148,8 @@ def _build_agent(
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise typer.Exit(2)
     llm = OpenAICompatibleClient(config.llm) if use_llm else None
-    return Agent(repo_root=repo, config=config, llm=llm)
+    log = _verbose_log if verbose else None
+    return Agent(repo_root=repo, config=config, llm=llm, log=log)
 
 
 @app.command("index")
@@ -287,7 +293,7 @@ def cmd_edit(
     if not overrides["web"]:
         overrides.pop("web")
 
-    agent = _build_agent(repo, config, overrides=overrides or None)
+    agent = _build_agent(repo, config, overrides=overrides or None, verbose=verbose)
 
     def _approve(url: str) -> bool:
         if not agent.config.web.require_user_approval:
