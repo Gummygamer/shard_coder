@@ -1,0 +1,5 @@
+FROM /run/media/darabat/24f15d44-9691-4cf4-8b52-bc03f1e3693f/models/HauhauCS/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive/Gemma-4-E4B-Uncensored-HauhauCS-Aggressive-Q4_K_M.gguf
+
+PARAMETER num_ctx 8192
+PARAMETER temperature 0.1
+PARAMETER num_predict 2048

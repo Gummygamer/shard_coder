@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -19,9 +19,111 @@ from .llm.openai_compatible import OpenAICompatibleClient
 app = typer.Typer(
     name="shardcoder",
     help="ShardCoder: a local-first coding agent for small-context LLMs.",
-    no_args_is_help=True,
 )
 console = Console()
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    prompt: Optional[List[str]] = typer.Argument(None),
+    repo: Path = typer.Option(Path("."), "--repo", exists=True, file_okay=False),
+    config: Optional[Path] = typer.Option(None, "--config"),
+    auto_apply: bool = typer.Option(False, "--auto-apply"),
+    dry_run: bool = typer.Option(False, "--dry-run"),
+    allow_dirty: bool = typer.Option(False, "--allow-dirty"),
+    verbose: bool = typer.Option(False, "--verbose"),
+) -> None:
+    """Run an agentic coding task, or enter interactive mode if no prompt is given."""
+    if ctx.invoked_subcommand is not None:
+        return
+
+    overrides: dict = {}
+    if dry_run:
+        overrides.setdefault("agent", {})["dry_run"] = True
+    if auto_apply:
+        overrides.setdefault("agent", {})["auto_apply"] = True
+        overrides.setdefault("agent", {})["dry_run"] = False
+
+    task = " ".join(prompt).strip() if prompt else ""
+
+    if task:
+        agent = _build_agent(repo, config, overrides=overrides or None)
+        report = agent.run_edit(task, allow_dirty=allow_dirty)
+        _render_report(report, verbose=verbose)
+    else:
+        _run_interactive(repo, config, overrides or None, allow_dirty=allow_dirty, verbose=verbose)
+
+
+def _run_interactive(
+    repo: Path,
+    config_path: Optional[Path],
+    overrides: dict | None,
+    *,
+    allow_dirty: bool,
+    verbose: bool,
+) -> None:
+    console.print(
+        Panel(
+            "[bold]ShardCoder[/bold] — local-first agentic coding\n"
+            "Type a task to edit code, or a question to ask about the codebase.\n\n"
+            "[dim]/index[/dim]   re-index the repo\n"
+            "[dim]/status[/dim]  show config & index stats\n"
+            "[dim]/exit[/dim]    quit (also Ctrl-D / Ctrl-C)",
+            title="ShardCoder",
+            border_style="cyan",
+        )
+    )
+
+    agent: Agent | None = None
+
+    def _get_agent() -> Agent:
+        nonlocal agent
+        if agent is None:
+            agent = _build_agent(repo, config_path, overrides=overrides)
+        return agent
+
+    while True:
+        try:
+            task = console.input("[bold cyan]>>> [/bold cyan]").strip()
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]Bye.[/dim]")
+            break
+
+        if not task:
+            continue
+
+        if task in ("/exit", "/quit", "exit", "quit"):
+            console.print("[dim]Bye.[/dim]")
+            break
+
+        if task == "/index":
+            added, skipped = _get_agent().index(only_changed=True)
+            console.print(
+                f"Indexed: [green]{added}[/green] new/updated, [dim]{skipped} unchanged[/dim]"
+            )
+            continue
+
+        if task == "/status":
+            a = _get_agent()
+            files = a.store.all_files()
+            summaries = a.store.all_summaries()
+            tbl = Table(title="ShardCoder status")
+            tbl.add_column("Field")
+            tbl.add_column("Value")
+            tbl.add_row("Repository", str(repo.resolve()))
+            tbl.add_row("Indexed files", str(len(files)))
+            tbl.add_row("Summarised files", str(len(summaries)))
+            tbl.add_row("Local model URL", a.config.llm.base_url)
+            tbl.add_row("Default model", a.config.llm.model)
+            console.print(tbl)
+            continue
+
+        try:
+            report = _get_agent().run_edit(task, allow_dirty=allow_dirty)
+            _render_report(report, verbose=verbose)
+        except KeyboardInterrupt:
+            console.print("\n[yellow]Interrupted.[/yellow]")
 
 
 def _build_agent(
