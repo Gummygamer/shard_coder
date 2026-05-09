@@ -482,8 +482,9 @@ class Agent:
         constraints = [
             "Make the smallest correct change.",
             "Do not modify unrelated files.",
-            "Use only the snippets and notes provided.",
-            "If context is insufficient, return NO_PATCH: <reason>.",
+            "For edits to existing files, use only the provided snippets and notes.",
+            "For new file creation, write complete working implementations.",
+            "Return NO_PATCH only if you cannot identify existing code to edit; never for new file creation.",
         ]
         if subtask.edit_scope == "small":
             constraints.append("This sub-task is scoped as small — keep the diff tight.")

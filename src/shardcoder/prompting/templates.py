@@ -162,21 +162,23 @@ JSON schema:
 
 
 def patch_prompt(subtask: str, context_pack: str, validation_command: str) -> str:
-    return f"""You are editing code.
+    return f"""You are editing or creating code.
 
 Goal:
-Fix only this sub-task:
 {subtask}
 
 Rules:
 1. Make the smallest correct change.
 2. Do not rewrite unrelated code.
-3. Do not invent APIs.
-4. Use only the files/snippets/context notes provided.
-5. If there is not enough information, return NO_PATCH: <reason>.
+3. Do not invent external APIs not shown in the context.
+4. For edits to existing files, use only the provided snippets/context.
+   For new file creation (files that do not yet exist), write complete working code.
+5. Return NO_PATCH: <reason> only if you cannot identify which existing code to change.
+   Do NOT return NO_PATCH for tasks that require creating new files.
 6. Output only a unified diff or NO_PATCH.
 7. Do not include prose before or after the diff.
 8. Diff headers must use "--- a/<path>" and "+++ b/<path>".
+   New files use "--- /dev/null" and "+++ b/<path>".
 
 Relevant context:
 {context_pack}
