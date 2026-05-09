@@ -352,15 +352,22 @@ def _render_report(report: AgentReport, *, verbose: bool = False) -> None:
         for w in report.warnings:
             console.print(f"[yellow]warning:[/yellow] {w}")
 
+    if report.dry_run:
+        console.print(
+            "[yellow bold]DRY RUN — no files were written.[/yellow bold] "
+            "Set [dim]auto_apply = true[/dim] in shardcoder.toml or pass [dim]--auto-apply[/dim] to apply changes."
+        )
+
     if not report.outcomes:
         console.print("[red]No subtasks executed.[/red]")
         return
 
+    files_label = "Files that would change" if report.dry_run else "Files changed"
     console.print(
         Panel(
             f"[bold]Task:[/bold] {report.task}\n"
             f"Subtasks executed: {len(report.outcomes)}\n"
-            f"Files changed: {', '.join(report.files_changed) or '(none)'}\n"
+            f"{files_label}: {', '.join(report.files_changed) or '(none)'}\n"
             f"External docs used: {report.used_external_docs}\n"
             f"Sources: {', '.join(report.external_sources) or '(none)'}\n"
             f"Stop reason: {report.stop_reason or '(plan completed)'}",
@@ -374,7 +381,7 @@ def _render_report(report: AgentReport, *, verbose: bool = False) -> None:
                 f"[bold]Subtask {idx}/{len(report.outcomes)}:[/bold] "
                 f"{outcome.subtask.goal}\n"
                 f"Iterations: {outcome.iterations}\n"
-                f"Files changed: "
+                f"{files_label}: "
                 f"{', '.join(outcome.apply_result.changed_files) if outcome.apply_result else '(none)'}",
                 title=outcome.subtask.id,
             )

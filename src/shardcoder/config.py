@@ -39,8 +39,8 @@ class LLMConfig(BaseModel):
 
 class AgentConfig(BaseModel):
     max_iterations: int = 4
-    dry_run: bool = True
-    auto_apply: bool = False
+    dry_run: bool = False
+    auto_apply: bool = True
     auto_run_tests: bool = True
 
 

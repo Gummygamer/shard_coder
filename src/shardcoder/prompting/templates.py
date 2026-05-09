@@ -194,6 +194,41 @@ Unified diff only, or NO_PATCH: <reason>.
 """
 
 
+def continuation_prompt(
+    original_goal: str,
+    file_path: str,
+    current_line_count: int,
+    current_tail: str,
+    context_pack: str,
+) -> str:
+    return f"""Your previous output was cut off by the token limit.
+You are continuing the same task. Append more code to finish it.
+
+Original goal:
+{original_goal}
+
+The file `{file_path}` already exists on disk with {current_line_count} line(s).
+The last lines of the file currently are:
+
+{current_tail}
+
+Rules:
+1. Output a unified diff that ADDS lines at or after line {current_line_count}.
+2. Do NOT mark the file as new. Use "--- a/{file_path}" and "+++ b/{file_path}".
+3. Do NOT remove or rewrite existing lines. Only add lines.
+4. If the file is already complete, return NO_PATCH: file is complete.
+5. Output unified diff only. No prose.
+
+Context:
+{context_pack}
+
+Repeat: continue writing `{file_path}`. Append-only. No new-file header.
+
+Output:
+Unified diff only, or NO_PATCH: <reason>.
+"""
+
+
 def repair_prompt(
     subtask: str,
     context_pack: str,

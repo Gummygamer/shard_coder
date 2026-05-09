@@ -45,6 +45,7 @@ from .planning.planner import make_plan
 from .prompting.schemas import Subtask, parse_failure_analysis
 from .prompting.templates import (
     SYSTEM_PATCH,
+    continuation_prompt,
     failure_analysis_prompt,
     patch_prompt,
     repair_prompt,
@@ -58,6 +59,11 @@ from .summarization.summarizer import FileSummary, summarize_file
 
 DEFAULT_DB_DIR = ".shardcoder"
 DEFAULT_DB_NAME = "shardcoder.db"
+
+# Maximum number of continuation subtasks chained off a single original
+# subtask before we give up. Stops runaway loops when the model keeps
+# producing length-truncated output.
+MAX_CONTINUATIONS_PER_SUBTASK = 8
 
 
 @dataclass
@@ -73,6 +79,8 @@ class SubtaskOutcome:
     used_external_docs: bool = False
     external_sources: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
+    truncated: bool = False
+    continuation_subtask: Subtask | None = None
 
 
 @dataclass
@@ -86,6 +94,7 @@ class AgentReport:
     warnings: list[str] = field(default_factory=list)
     final_validation: CommandResult | None = None
     stop_reason: str = ""
+    dry_run: bool = False
 
 
 class Agent:
@@ -254,14 +263,21 @@ class Agent:
         for st in plan.subtasks:
             self._emit(f"  {st.id}: {st.goal}")
 
+        is_dry_run = self.config.agent.dry_run or not self.config.agent.auto_apply
         report = AgentReport(
             task=task,
             plan_used_fallback=planner_result.fallback_used,
+            dry_run=is_dry_run,
         )
 
         cap = len(plan.subtasks) if max_subtasks is None else max(max_subtasks, 0)
         consecutive_failures = 0
-        for subtask in plan.subtasks[:cap]:
+        # Mutable queue so continuation subtasks (queued after a length-
+        # truncated output) can be inserted ahead of the remaining plan.
+        queue: list[Subtask] = list(plan.subtasks[:cap])
+        continuations_per_root: dict[str, int] = {}
+        while queue:
+            subtask = queue.pop(0)
             self._emit(f"\n[{subtask.id}] Starting: {subtask.goal}")
             outcome = self.run_subtask(
                 subtask,
@@ -282,6 +298,20 @@ class Agent:
                 report.final_validation = outcome.command_result
 
             self._update_memory(task, outcome)
+
+            if outcome.continuation_subtask is not None:
+                root_id = subtask.id.split("-cont", 1)[0]
+                count = continuations_per_root.get(root_id, 0)
+                if count < MAX_CONTINUATIONS_PER_SUBTASK:
+                    continuations_per_root[root_id] = count + 1
+                    queue.insert(0, outcome.continuation_subtask)
+                else:
+                    msg = (
+                        f"continuation limit ({MAX_CONTINUATIONS_PER_SUBTASK}) "
+                        f"reached for {root_id}; the file may still be incomplete"
+                    )
+                    warnings.append(msg)
+                    self._emit(msg)
 
             if outcome.no_patch_reason:
                 report.stop_reason = (
@@ -405,17 +435,31 @@ class Agent:
             subtask.validation or self.config.validation.test_command or ""
         )
 
+        is_continuation = "-cont" in subtask.id
+
         for iteration in range(1, self.config.agent.max_iterations + 1):
             outcome.iterations = iteration
             self._emit(f"[{subtask.id}] Iteration {iteration}: calling model for patch...")
-            patch_text = self._ask_for_patch(subtask, context_pack, validation_command)
+            if is_continuation:
+                patch_text, finish_reason = self._ask_for_continuation(
+                    subtask, context_pack
+                )
+            else:
+                patch_text, finish_reason = self._ask_for_patch(
+                    subtask, context_pack, validation_command
+                )
             outcome.patch_text = patch_text
+            truncated = finish_reason == "length"
 
             if patch_text.lstrip().startswith("NO_PATCH"):
                 self._emit(f"[{subtask.id}] Iteration {iteration}: model returned NO_PATCH")
             else:
                 nlines = patch_text.count("\n") + 1
-                self._emit(f"[{subtask.id}] Iteration {iteration}: model returned {nlines}-line diff")
+                trunc_note = " (truncated at max_output_tokens)" if truncated else ""
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: "
+                    f"model returned {nlines}-line diff{trunc_note}"
+                )
 
             self._emit(f"[{subtask.id}] Iteration {iteration}: validating patch...")
             validation_result = validate_model_output(
@@ -447,6 +491,27 @@ class Agent:
                 )
                 continue
 
+            # If the model hit max_output_tokens, only apply when the partial
+            # diff is safe: a new-file write, or an edit that only ADDS lines.
+            # Anything that removes or rewrites existing lines could land in a
+            # corrupted state mid-edit, so we reject and let the loop retry.
+            safe_partial = self._is_safe_partial_diff(validation_result.diffs)
+            if truncated and not safe_partial:
+                msg = (
+                    f"output truncated mid-edit at max_output_tokens="
+                    f"{self.config.llm.max_output_tokens}; refusing partial "
+                    "edit (diff contains removals or rewrites)"
+                )
+                self._emit(f"[{subtask.id}] Iteration {iteration}: {msg}")
+                outcome.notes.append(f"iteration {iteration}: {msg}")
+                context_pack = self._build_context_pack(
+                    subtask=subtask,
+                    failing_files=[],
+                    validation_text=msg + "\nReply with a smaller diff that fits.",
+                    external=external_result,
+                )
+                continue
+
             target_files = [fd.target_path for fd in validation_result.diffs]
             self._emit(
                 f"[{subtask.id}] Iteration {iteration}: applying patch"
@@ -473,6 +538,21 @@ class Agent:
                     f"[{subtask.id}] Iteration {iteration}: wrote "
                     + ", ".join(apply_result.changed_files)
                 )
+                # Refresh the index so retrieval can see newly-written /
+                # extended files in any continuation subtask.
+                if not self.config.agent.dry_run:
+                    self.index(only_changed=True)
+
+            if truncated:
+                outcome.truncated = True
+                outcome.continuation_subtask = self._build_continuation_subtask(
+                    subtask, validation_result.diffs
+                )
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: output truncated; "
+                    f"queued continuation {outcome.continuation_subtask.id}"
+                )
+                break
 
             if (
                 self.config.agent.auto_run_tests
@@ -521,6 +601,72 @@ class Agent:
             break
 
         return outcome
+
+    @staticmethod
+    def _is_safe_partial_diff(diffs: list) -> bool:
+        """Decide whether a length-truncated diff is safe to apply.
+
+        New-file writes are always safe (we're just creating a partial file
+        the continuation will extend). Edits are safe only if every hunk is
+        pure-addition: no ``-`` lines that would remove or rewrite existing
+        content. Everything else risks corrupting a file mid-edit.
+        """
+        for fd in diffs:
+            if fd.is_new_file:
+                continue
+            if fd.is_deleted_file:
+                return False
+            for hunk in fd.hunks:
+                for line in hunk.lines:
+                    if line.startswith("-") and not line.startswith("---"):
+                        return False
+        return True
+
+    def _build_continuation_subtask(
+        self, parent: Subtask, diffs: list
+    ) -> Subtask:
+        """Build a follow-up subtask that asks the model to extend the
+        partially-written file produced by *parent*.
+
+        ``diffs`` is the list of :class:`FileDiff` from the truncated patch.
+        We pin ``likely_files`` to the new files so retrieval surfaces the
+        partial content; the goal text carries the continuation framing the
+        model needs.
+        """
+        new_paths = [
+            fd.target_path
+            for fd in diffs
+            if fd.is_new_file and not fd.is_deleted_file
+        ] or [fd.target_path for fd in diffs]
+
+        # Keep a continuation depth counter on the id so we can detect runaway
+        # chains and avoid colliding ids in the report. T1 -> T1-cont1 -> T1-cont2 ...
+        if "-cont" in parent.id:
+            base, _, depth = parent.id.rpartition("-cont")
+            try:
+                next_depth = int(depth) + 1
+            except ValueError:
+                next_depth = 1
+        else:
+            base, next_depth = parent.id, 1
+
+        goal = (
+            f"Continue writing {', '.join(new_paths)}: the previous output "
+            f"was cut off by max_output_tokens. Append the remaining code so "
+            f"the file fulfils the original goal. Original goal: {parent.goal}"
+        )
+
+        return Subtask(
+            id=f"{base}-cont{next_depth}",
+            goal=goal,
+            reason="continuation after truncated output",
+            search_queries=parent.search_queries,
+            likely_files=new_paths,
+            edit_scope=parent.edit_scope,
+            validation=parent.validation,
+            needs_external_docs=False,
+            external_doc_reason="",
+        )
 
     # ------------------------------------------------------------------
     # Internals
@@ -571,9 +717,9 @@ class Agent:
 
     def _ask_for_patch(
         self, subtask: Subtask, pack: ContextPack, validation_command: str
-    ) -> str:
+    ) -> tuple[str, str | None]:
         if self.llm is None:
-            return "NO_PATCH: no LLM client configured"
+            return "NO_PATCH: no LLM client configured", None
         try:
             result = self.llm.chat(
                 [
@@ -588,9 +734,64 @@ class Agent:
                 temperature=0.0,
                 max_tokens=self.config.llm.max_output_tokens,
             )
-            return result.text
+            return result.text, result.finish_reason
         except LLMError as exc:
-            return f"NO_PATCH: local model error — {exc}"
+            return f"NO_PATCH: local model error — {exc}", None
+
+    def _ask_for_continuation(
+        self, subtask: Subtask, pack: ContextPack
+    ) -> tuple[str, str | None]:
+        """Ask the model to extend a partially-written file.
+
+        ``subtask.likely_files[0]`` is the file we're continuing. We read its
+        current line count + last few lines and feed them into a dedicated
+        continuation prompt that demands an append-only edit-style diff.
+        """
+        if self.llm is None:
+            return "NO_PATCH: no LLM client configured", None
+
+        file_path = subtask.likely_files[0] if subtask.likely_files else ""
+        full_path = self.repo_root / file_path if file_path else None
+        try:
+            current_text = (
+                full_path.read_text(encoding="utf-8", errors="replace")
+                if full_path and full_path.exists()
+                else ""
+            )
+        except OSError:
+            current_text = ""
+        current_lines = current_text.splitlines()
+        line_count = len(current_lines)
+        tail = "\n".join(current_lines[-10:]) if current_lines else "(file empty)"
+
+        # Strip the wrapping "Original goal: ..." that the continuation
+        # subtask carries, to surface only the original user-visible goal.
+        if "Original goal:" in subtask.goal:
+            original_goal = subtask.goal.split("Original goal:", 1)[1].strip()
+        else:
+            original_goal = subtask.goal
+
+        try:
+            result = self.llm.chat(
+                [
+                    ChatMessage(role="system", content=SYSTEM_PATCH),
+                    ChatMessage(
+                        role="user",
+                        content=continuation_prompt(
+                            original_goal=original_goal,
+                            file_path=file_path,
+                            current_line_count=line_count,
+                            current_tail=tail,
+                            context_pack=pack.render(),
+                        ),
+                    ),
+                ],
+                temperature=0.0,
+                max_tokens=self.config.llm.max_output_tokens,
+            )
+            return result.text, result.finish_reason
+        except LLMError as exc:
+            return f"NO_PATCH: local model error — {exc}", None
 
     def _ask_for_repair(
         self,
@@ -598,9 +799,9 @@ class Agent:
         pack: ContextPack,
         previous_patch: str,
         failure_summary: str,
-    ) -> str:
+    ) -> tuple[str, str | None]:
         if self.llm is None:
-            return "NO_PATCH: no LLM client configured"
+            return "NO_PATCH: no LLM client configured", None
         try:
             result = self.llm.chat(
                 [
@@ -615,9 +816,9 @@ class Agent:
                 temperature=0.0,
                 max_tokens=self.config.llm.max_output_tokens,
             )
-            return result.text
+            return result.text, result.finish_reason
         except LLMError as exc:
-            return f"NO_PATCH: local model error — {exc}"
+            return f"NO_PATCH: local model error — {exc}", None
 
     def _analyse_failure(self, failure_summary: str):
         if self.llm is None:

@@ -8,8 +8,8 @@ timeout_seconds = 120
 
 [agent]
 max_iterations = 4
-dry_run = true
-auto_apply = false
+dry_run = false
+auto_apply = true
 auto_run_tests = true
 
 [repository]

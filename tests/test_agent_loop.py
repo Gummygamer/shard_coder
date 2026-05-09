@@ -51,12 +51,23 @@ def _diff(path: str, before: str, after: str) -> str:
     )
 
 
+_PATCH_PROMPT_MARKERS = (
+    "You are editing or creating code.",
+    "Your previous patch failed",
+    "Your previous output was cut off",
+)
+
+
 class StubLLM:
-    """Minimal LLM stub that can return a plan and a queue of patches."""
+    """Minimal LLM stub that can return a plan and a queue of patches.
+
+    Patches can be either a string (text only, finish_reason=stop) or a
+    ``(text, finish_reason)`` tuple if a test wants to simulate truncation.
+    """
 
     model = "stub"
 
-    def __init__(self, *, plan: dict, patches: list[str]):
+    def __init__(self, *, plan: dict, patches: list):
         self._plan = plan
         self._patches = list(patches)
         self.plan_calls = 0
@@ -67,10 +78,14 @@ class StubLLM:
         if "Decompose the user task" in user:
             self.plan_calls += 1
             return ChatResult(text=json.dumps(self._plan))
-        if "You are editing code" in user or "Your previous patch failed" in user:
+        if any(marker in user for marker in _PATCH_PROMPT_MARKERS):
             self.patch_calls += 1
-            patch = self._patches[self.patch_calls - 1]
-            return ChatResult(text=patch)
+            entry = self._patches[self.patch_calls - 1]
+            if isinstance(entry, tuple):
+                text, finish_reason = entry
+            else:
+                text, finish_reason = entry, "stop"
+            return ChatResult(text=text, finish_reason=finish_reason)
         # Failure analysis or anything else — return harmless empty JSON.
         return ChatResult(text="{}")
 
@@ -191,6 +206,92 @@ def test_max_subtasks_caps_execution(tmp_path: Path) -> None:
     assert len(report.outcomes) == 2
     assert any("max-subtasks=2" in w for w in report.warnings)
     assert report.stop_reason == ""
+
+
+def test_truncated_new_file_queues_continuation(tmp_path: Path) -> None:
+    """A length-truncated new-file patch should land partial content,
+    queue a continuation subtask, and the continuation should append the
+    rest of the file before the loop ends."""
+    repo = _build_repo(tmp_path)
+    plan = _plan(("T1", "create new module foo.py", "foo.py"))
+
+    partial_new_file = (
+        "--- /dev/null\n"
+        "+++ b/foo.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+def foo():\n"
+        "+    return 1\n"
+    )
+    # Continuation appends two more lines starting at line 3 of foo.py.
+    continuation_diff = (
+        "--- a/foo.py\n"
+        "+++ b/foo.py\n"
+        "@@ -2,1 +2,3 @@\n"
+        "     return 1\n"
+        "+\n"
+        "+def bar():\n"
+        "+    return 2\n"
+    )
+    llm = StubLLM(
+        plan=plan,
+        patches=[
+            (partial_new_file, "length"),
+            continuation_diff,  # finish_reason defaults to "stop"
+        ],
+    )
+    # auto_apply=True so the partial file actually lands on disk and the
+    # continuation can read it back from the repo.
+    config = ShardCoderConfig()
+    config.agent = AgentConfig(
+        max_iterations=1,
+        dry_run=False,
+        auto_apply=True,
+        auto_run_tests=False,
+    )
+    agent = Agent(repo_root=repo, config=config, llm=llm)
+
+    report = agent.run_edit("create foo.py", allow_dirty=True)
+
+    # Two LLM patch calls: original + one continuation.
+    assert llm.patch_calls == 2
+    assert len(report.outcomes) == 2
+    assert report.outcomes[0].truncated is True
+    assert report.outcomes[0].continuation_subtask is not None
+    assert report.outcomes[1].subtask.id == "T1-cont1"
+    assert "foo.py" in report.files_changed
+    # Final file has both halves stitched together.
+    final = (repo / "foo.py").read_text()
+    assert "def foo()" in final
+    assert "def bar()" in final
+    assert report.stop_reason == ""
+
+
+def test_truncated_edit_with_removals_is_refused(tmp_path: Path) -> None:
+    """A length-truncated edit-style diff that removes lines should NOT
+    be applied — the loop must retry rather than corrupt the file."""
+    repo = _build_repo(tmp_path)
+    plan = _plan(("T1", "edit alpha", "alpha.py"))
+
+    # Truncated diff that removes a line — unsafe to apply mid-edit.
+    bad_partial = (
+        "--- a/alpha.py\n"
+        "+++ b/alpha.py\n"
+        "@@ -1,1 +1,1 @@\n"
+        "-a = 1\n"
+        "+a = 999\n"
+    )
+    llm = StubLLM(plan=plan, patches=[(bad_partial, "length")])
+    agent = _agent(repo, llm)
+
+    report = agent.run_edit("edit alpha", allow_dirty=True)
+
+    # The loop ran out of iterations without applying.
+    assert llm.patch_calls == 1
+    assert report.outcomes[0].apply_result is None
+    # File untouched on disk.
+    assert (repo / "alpha.py").read_text() == "a = 1\n"
+    # No continuation queued for unsafe partial.
+    assert report.outcomes[0].continuation_subtask is None
 
 
 def test_recovery_after_single_failure_does_not_stop(tmp_path: Path) -> None:
