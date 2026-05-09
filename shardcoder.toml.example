@@ -1,0 +1,38 @@
+[llm]
+base_url = "http://localhost:11434/v1"
+model = "gemma-4"
+max_context_tokens = 8192
+max_output_tokens = 1024
+temperature = 0.1
+timeout_seconds = 120
+
+[agent]
+max_iterations = 4
+dry_run = true
+auto_apply = false
+auto_run_tests = true
+
+[repository]
+ignore_dirs = [".git", "node_modules", "dist", "build", "target", ".venv", "__pycache__", ".next", "vendor", "coverage", ".mypy_cache", ".pytest_cache"]
+max_file_bytes = 200000
+
+[validation]
+test_command = "pytest"
+lint_command = ""
+format_command = ""
+
+[context]
+max_memory_tokens = 800
+max_snippet_tokens = 3500
+max_summary_tokens = 2000
+max_validation_tokens = 1000
+max_web_context_tokens = 800
+
+[web]
+enabled = false
+max_queries = 3
+max_results_per_query = 5
+max_fetched_pages = 2
+require_user_approval = true
+prefer_official_docs = true
+backend = "disabled"
