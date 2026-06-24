@@ -34,7 +34,9 @@ class LLMConfig(BaseModel):
     max_context_tokens: int = 8192
     max_output_tokens: int = 2048
     temperature: float = 0.1
-    timeout_seconds: int = 120
+    timeout_seconds: int = 300
+    timeout_retries: int = Field(default=1, ge=0)
+    timeout_retry_backoff_seconds: float = Field(default=1.0, ge=0.0)
 
 
 class AgentConfig(BaseModel):

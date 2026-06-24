@@ -117,6 +117,11 @@ def _run_interactive(
             tbl.add_row("Local model URL", a.config.llm.base_url)
             tbl.add_row("Default model", a.config.llm.model)
             tbl.add_row("Max output tokens", str(a.config.llm.max_output_tokens))
+            tbl.add_row("Request timeout", f"{a.config.llm.timeout_seconds}s")
+            tbl.add_row("Timeout retries", str(a.config.llm.timeout_retries))
+            tbl.add_row(
+                "Retry backoff", f"{a.config.llm.timeout_retry_backoff_seconds:g}s"
+            )
             console.print(tbl)
             continue
 
@@ -350,6 +355,11 @@ def cmd_status(
     table.add_row("Local model URL", agent.config.llm.base_url)
     table.add_row("Default model", agent.config.llm.model)
     table.add_row("Max output tokens", str(agent.config.llm.max_output_tokens))
+    table.add_row("Request timeout", f"{agent.config.llm.timeout_seconds}s")
+    table.add_row("Timeout retries", str(agent.config.llm.timeout_retries))
+    table.add_row(
+        "Retry backoff", f"{agent.config.llm.timeout_retry_backoff_seconds:g}s"
+    )
     table.add_row("Web backend", agent.config.web.backend)
     table.add_row("Web enabled", str(agent.config.web.enabled))
     console.print(table)
@@ -398,6 +408,11 @@ def cmd_llm_check(
     table.add_row("Configured model", loaded.llm.model)
     table.add_row("Selected model", info.selected_model)
     table.add_row("Max output tokens", str(loaded.llm.max_output_tokens))
+    table.add_row("Request timeout", f"{loaded.llm.timeout_seconds}s")
+    table.add_row("Timeout retries", str(loaded.llm.timeout_retries))
+    table.add_row(
+        "Retry backoff", f"{loaded.llm.timeout_retry_backoff_seconds:g}s"
+    )
     table.add_row("Available models", ", ".join(info.models) or "(none)")
     if chat:
         table.add_row("Chat response", chat_text or "(empty)")

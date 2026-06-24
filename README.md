@@ -61,7 +61,9 @@ model = "auto"
 max_context_tokens = 8192
 max_output_tokens = 2048
 temperature = 0.1
-timeout_seconds = 120
+timeout_seconds = 300
+timeout_retries = 1
+timeout_retry_backoff_seconds = 1.0
 ```
 
 In LM Studio, load a model, open the local server tab, and start the server.
@@ -70,6 +72,9 @@ model advertised by the server. If you want to pin a model explicitly, replace
 `auto` with the exact model id shown by LM Studio.
 If LM Studio still stops at 1024 tokens, raise the server preset's response
 token limit to match `max_output_tokens`.
+Local code-generation calls can be slow on CPU or large models; `timeout_seconds`
+controls each HTTP read timeout, and `timeout_retries` controls how many extra
+attempts ShardCoder makes after a read timeout.
 
 Check the connection before running an agent task:
 

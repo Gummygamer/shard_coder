@@ -141,3 +141,69 @@ def test_auto_model_reports_clear_error_when_no_model_is_loaded() -> None:
 
     with pytest.raises(LLMError, match="No models are loaded"):
         client.check_connection()
+
+
+def test_chat_retries_read_timeout_then_returns_response() -> None:
+    chat_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_calls
+        if request.url.path == "/v1/chat/completions":
+            chat_calls += 1
+            if chat_calls == 1:
+                raise httpx.ReadTimeout("slow response", request=request)
+            return httpx.Response(
+                200,
+                json={
+                    "choices": [
+                        {
+                            "message": {"role": "assistant", "content": "ok"},
+                            "finish_reason": "stop",
+                        }
+                    ]
+                },
+            )
+        return httpx.Response(404, text="not found")
+
+    client = OpenAICompatibleClient(
+        LLMConfig(
+            base_url="http://localhost:1234/v1",
+            model="loaded-model-a",
+            timeout_seconds=1,
+            timeout_retries=1,
+            timeout_retry_backoff_seconds=0,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    result = client.chat([ChatMessage(role="user", content="hello")])
+
+    assert result.text == "ok"
+    assert chat_calls == 2
+
+
+def test_chat_read_timeout_stops_after_configured_retries() -> None:
+    chat_calls = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal chat_calls
+        if request.url.path == "/v1/chat/completions":
+            chat_calls += 1
+            raise httpx.ReadTimeout("slow response", request=request)
+        return httpx.Response(404, text="not found")
+
+    client = OpenAICompatibleClient(
+        LLMConfig(
+            base_url="http://localhost:1234/v1",
+            model="loaded-model-a",
+            timeout_seconds=1,
+            timeout_retries=2,
+            timeout_retry_backoff_seconds=0,
+        ),
+        transport=httpx.MockTransport(handler),
+    )
+
+    with pytest.raises(LLMError, match="Local model server timed out after 1s"):
+        client.chat([ChatMessage(role="user", content="hello")])
+
+    assert chat_calls == 3

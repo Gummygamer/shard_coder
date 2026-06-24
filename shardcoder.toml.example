@@ -4,7 +4,9 @@ model = "auto"
 max_context_tokens = 8192
 max_output_tokens = 2048
 temperature = 0.1
-timeout_seconds = 120
+timeout_seconds = 300
+timeout_retries = 1
+timeout_retry_backoff_seconds = 1.0
 
 [agent]
 max_iterations = 4

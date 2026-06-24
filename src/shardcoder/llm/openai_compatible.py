@@ -7,6 +7,7 @@ Ollama, llama.cpp ``server``, LM Studio, vLLM, and others.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -36,6 +37,8 @@ class OpenAICompatibleClient:
         self.model = config.model.strip() or "auto"
         self._base_url = config.base_url.rstrip("/")
         self._timeout = config.timeout_seconds
+        self._timeout_retries = config.timeout_retries
+        self._timeout_retry_backoff_seconds = config.timeout_retry_backoff_seconds
         self._transport = transport
         self._resolved_model: str | None = None
         self._headers = {
@@ -126,26 +129,32 @@ class OpenAICompatibleClient:
         *,
         payload: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        try:
-            with httpx.Client(**self._client_kwargs()) as client:
-                response = client.request(
-                    method,
-                    url,
-                    headers=self._headers,
-                    json=payload,
-                )
-        except httpx.ConnectError as exc:
-            raise LLMError(
-                f"Could not reach local model server at {self._base_url}. "
-                "Is the server running? Original error: "
-                f"{exc.__class__.__name__}: {exc}"
-            ) from exc
-        except httpx.ReadTimeout as exc:
-            raise LLMError(
-                f"Local model server timed out after {self._timeout}s."
-            ) from exc
-        except httpx.HTTPError as exc:
-            raise LLMError(f"HTTP error talking to local model server: {exc}") from exc
+        for attempt in range(self._timeout_retries + 1):
+            try:
+                with httpx.Client(**self._client_kwargs()) as client:
+                    response = client.request(
+                        method,
+                        url,
+                        headers=self._headers,
+                        json=payload,
+                    )
+                break
+            except httpx.ConnectError as exc:
+                raise LLMError(
+                    f"Could not reach local model server at {self._base_url}. "
+                    "Is the server running? Original error: "
+                    f"{exc.__class__.__name__}: {exc}"
+                ) from exc
+            except httpx.ReadTimeout as exc:
+                if attempt < self._timeout_retries:
+                    if self._timeout_retry_backoff_seconds:
+                        time.sleep(self._timeout_retry_backoff_seconds)
+                    continue
+                raise LLMError(
+                    f"Local model server timed out after {self._timeout}s."
+                ) from exc
+            except httpx.HTTPError as exc:
+                raise LLMError(f"HTTP error talking to local model server: {exc}") from exc
 
         if response.status_code >= 400:
             raise LLMError(
