@@ -55,6 +55,7 @@ from .retrieval.retriever import RetrievalRequest, queries_from_task, retrieve
 from .safety.commands import assess_command
 from .summarization.store import SummaryStore
 from .summarization.summarizer import FileSummary, summarize_file
+from .tokens.budget import cap_text
 
 
 DEFAULT_DB_DIR = ".shardcoder"
@@ -68,6 +69,7 @@ MAX_CONTINUATIONS_PER_SUBTASK = 8
 # Non-context prompt text, chat role overhead, and rough tokenizer drift.
 PROMPT_CONTEXT_HEADROOM_TOKENS = 1024
 MIN_CONTEXT_PACK_TOKENS = 512
+TRUNCATED_OUTPUT_EXCERPT_TOKENS = 180
 
 
 @dataclass
@@ -391,6 +393,12 @@ class Agent:
                     warnings.append(msg)
                     self._emit(msg)
 
+        if not report.stop_reason and report.outcomes:
+            last = report.outcomes[-1]
+            if self._subtask_hard_failed(last):
+                report.stop_reason = self._failure_stop_reason(last)
+                warnings.append(report.stop_reason)
+
         if max_subtasks is not None and len(plan.subtasks) > cap and not report.stop_reason:
             warnings.append(
                 f"--max-subtasks={max_subtasks} reached; "
@@ -428,11 +436,29 @@ class Agent:
             return False
         if outcome.validation is None or not outcome.validation.ok:
             return True
+        if outcome.apply_result is None:
+            return True
         if outcome.apply_result is not None and not outcome.apply_result.ok:
             return True
         if outcome.command_result is not None and not outcome.command_result.ok:
             return True
         return False
+
+    @staticmethod
+    def _failure_stop_reason(outcome: SubtaskOutcome) -> str:
+        prefix = f"subtask {outcome.subtask.id} failed"
+        if outcome.validation and outcome.validation.errors:
+            return f"{prefix}: {'; '.join(outcome.validation.errors)}"
+        if outcome.apply_result and outcome.apply_result.errors:
+            return f"{prefix}: {'; '.join(outcome.apply_result.errors)}"
+        if outcome.command_result and not outcome.command_result.ok:
+            return (
+                f"{prefix}: validation command exited "
+                f"{outcome.command_result.exit_code}"
+            )
+        if outcome.truncated:
+            return f"{prefix}: model output was truncated before a safe patch was applied"
+        return f"{prefix}: no patch was applied"
 
     # ------------------------------------------------------------------
     # Subtask execution (one iteration + repair loop)
@@ -538,14 +564,38 @@ class Agent:
                     f"[{subtask.id}] Iteration {iteration}: patch rejected — "
                     + "; ".join(validation_result.errors)
                 )
+                if truncated:
+                    outcome.truncated = True
+                    msg = (
+                        "model hit max_output_tokens before producing a valid "
+                        "unified diff; no files were written from the partial response"
+                    )
+                    self._emit(f"[{subtask.id}] Iteration {iteration}: {msg}")
+                    outcome.notes.append(f"iteration {iteration}: {msg}")
+                    if patch_text.strip():
+                        excerpt = cap_text(
+                            patch_text.strip(), TRUNCATED_OUTPUT_EXCERPT_TOKENS
+                        )
+                        outcome.notes.append(
+                            f"iteration {iteration}: truncated output excerpt:\n{excerpt}"
+                        )
                 outcome.notes.append(
                     f"iteration {iteration}: patch rejected — {'; '.join(validation_result.errors)}"
                 )
                 # Feed the failure back as 'validation' for the next iteration.
+                retry_guidance = "\n".join(validation_result.errors)
+                if truncated:
+                    retry_guidance = (
+                        retry_guidance
+                        + "\nThe previous response hit max_output_tokens before a "
+                        "valid diff was produced. Reply with a smaller unified diff "
+                        "only, or split the work into the first complete file-sized "
+                        "patch."
+                    )
                 context_pack = self._build_context_pack(
                     subtask=subtask,
                     failing_files=[],
-                    validation_text="\n".join(validation_result.errors),
+                    validation_text=retry_guidance,
                     external=external_result,
                 )
                 continue

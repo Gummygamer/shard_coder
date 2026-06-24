@@ -294,6 +294,30 @@ def test_truncated_edit_with_removals_is_refused(tmp_path: Path) -> None:
     assert report.outcomes[0].continuation_subtask is None
 
 
+def test_truncated_invalid_output_records_feedback(tmp_path: Path) -> None:
+    """If the model hits max_tokens before a diff header, keep useful feedback."""
+    repo = _build_repo(tmp_path)
+    plan = _plan(("T1", "create new module foo.py", "foo.py"))
+    truncated_prose = (
+        "I will create foo.py with the requested helpers.\n"
+        "First, here is the implementation approach before the diff starts"
+    )
+    llm = StubLLM(plan=plan, patches=[(truncated_prose, "length")])
+    agent = _agent(repo, llm)
+
+    report = agent.run_edit("create foo.py", allow_dirty=True)
+
+    assert llm.patch_calls == 1
+    outcome = report.outcomes[0]
+    assert outcome.truncated is True
+    assert outcome.apply_result is None
+    assert outcome.continuation_subtask is None
+    assert any("max_output_tokens" in note for note in outcome.notes)
+    assert any("truncated output excerpt" in note for note in outcome.notes)
+    assert "model output does not look like a unified diff" in report.stop_reason
+    assert not (repo / "foo.py").exists()
+
+
 def test_recovery_after_single_failure_does_not_stop(tmp_path: Path) -> None:
     """One bad subtask between two good ones should not trigger early stop."""
     repo = _build_repo(tmp_path)

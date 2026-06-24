@@ -447,6 +447,9 @@ def _render_report(report: AgentReport, *, verbose: bool = False) -> None:
             for w in outcome.validation.warnings:
                 console.print(f"[yellow]patch warning:[/yellow] {w}")
 
+        for note in outcome.notes:
+            console.print(f"[yellow]note:[/yellow] {note}")
+
         if outcome.command_result:
             status = (
                 "[green]OK[/green]"
