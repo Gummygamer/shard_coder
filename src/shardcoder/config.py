@@ -28,9 +28,9 @@ from pydantic import BaseModel, Field, ValidationError
 
 
 class LLMConfig(BaseModel):
-    base_url: str = "http://localhost:11434/v1"
+    base_url: str = "http://localhost:1234/v1"
     api_key: str | None = None
-    model: str = "gemma-4"
+    model: str = "auto"
     max_context_tokens: int = 8192
     max_output_tokens: int = 1024
     temperature: float = 0.1

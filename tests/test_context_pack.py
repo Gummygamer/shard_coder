@@ -99,6 +99,45 @@ def test_context_pack_stays_under_global_budget(repo_with_files: Path) -> None:
     assert pack.used_tokens <= pack.max_tokens
 
 
+def test_context_pack_respects_model_window_budget(repo_with_files: Path) -> None:
+    candidates = [
+        Candidate(
+            path="high.py",
+            score=10.0,
+            reason="planner-likely",
+            summary_text="x" * 500,
+        ),
+        Candidate(
+            path="low.py",
+            score=8.0,
+            reason="also relevant",
+            summary_text="y" * 500,
+        ),
+    ]
+    config = ContextConfig(
+        max_summary_tokens=500,
+        max_snippet_tokens=500,
+        max_memory_tokens=500,
+        max_validation_tokens=500,
+        max_web_context_tokens=500,
+    )
+
+    pack = build_context_pack(
+        task="fit the model window",
+        candidates=candidates,
+        repo_root=repo_with_files,
+        config=config,
+        memory="memory " * 200,
+        validation="failure " * 200,
+        max_snippet_lines=20,
+        max_tokens=180,
+    )
+
+    assert pack.max_tokens == 180
+    assert pack.used_tokens <= 180
+    assert pack.pruned_sections
+
+
 def test_compact_web_notes_fit_within_budget(repo_with_files: Path) -> None:
     today = date.today().isoformat()
     notes = [

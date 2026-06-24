@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import List, Optional
+from typing import Optional
 
 import typer
 from rich.console import Console
@@ -19,6 +19,7 @@ from .llm.openai_compatible import OpenAICompatibleClient
 app = typer.Typer(
     name="shardcoder",
     help="ShardCoder: a local-first coding agent for small-context LLMs.",
+    context_settings={"allow_extra_args": True, "ignore_unknown_options": True},
 )
 console = Console()
 
@@ -26,7 +27,6 @@ console = Console()
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
-    prompt: Optional[List[str]] = typer.Argument(None),
     repo: Path = typer.Option(Path("."), "--repo", exists=True, file_okay=False),
     config: Optional[Path] = typer.Option(None, "--config"),
     auto_apply: bool = typer.Option(False, "--auto-apply"),
@@ -45,7 +45,7 @@ def main(
         overrides.setdefault("agent", {})["auto_apply"] = True
         overrides.setdefault("agent", {})["dry_run"] = False
 
-    task = " ".join(prompt).strip() if prompt else ""
+    task = " ".join(ctx.args).strip()
 
     if task:
         agent = _build_agent(repo, config, overrides=overrides or None, verbose=verbose)
@@ -344,6 +344,54 @@ def cmd_status(
     table.add_row("Default model", agent.config.llm.model)
     table.add_row("Web backend", agent.config.web.backend)
     table.add_row("Web enabled", str(agent.config.web.enabled))
+    console.print(table)
+
+
+@app.command("llm-check")
+def cmd_llm_check(
+    config: Optional[Path] = typer.Option(None, "--config"),
+    chat: bool = typer.Option(
+        False,
+        "--chat",
+        help="Also send a tiny chat completion request.",
+    ),
+) -> None:
+    """Probe the configured OpenAI-compatible model server."""
+    try:
+        loaded = load_config(config_path=str(config) if config else None)
+    except ConfigError as exc:
+        console.print(f"[red]Configuration error:[/red] {exc}")
+        raise typer.Exit(2)
+
+    client = OpenAICompatibleClient(loaded.llm)
+    try:
+        info = client.check_connection()
+        chat_text = ""
+        if chat:
+            result = client.chat(
+                [
+                    ChatMessage(
+                        role="user",
+                        content="Reply with exactly: ok",
+                    )
+                ],
+                temperature=0.0,
+                max_tokens=8,
+            )
+            chat_text = result.text.strip()
+    except LLMError as exc:
+        console.print(f"[red]LLM connection failed:[/red] {exc}")
+        raise typer.Exit(1)
+
+    table = Table(title="LLM connection")
+    table.add_column("Field")
+    table.add_column("Value")
+    table.add_row("Base URL", info.base_url)
+    table.add_row("Configured model", loaded.llm.model)
+    table.add_row("Selected model", info.selected_model)
+    table.add_row("Available models", ", ".join(info.models) or "(none)")
+    if chat:
+        table.add_row("Chat response", chat_text or "(empty)")
     console.print(table)
 
 

@@ -52,19 +52,30 @@ endpoint. Common options:
 Copy `shardcoder.toml.example` to `shardcoder.toml` in your project and
 edit `[llm]` to point at the server you started.
 
-## Configure Gemma 4
+## Configure LM Studio
 
 ```toml
 [llm]
-base_url = "http://localhost:11434/v1"
-model = "gemma-4"
+base_url = "http://localhost:1234/v1"
+model = "auto"
 max_context_tokens = 8192
 max_output_tokens = 1024
 temperature = 0.1
 ```
 
-ShardCoder doesn't bake in any Gemma-specific behaviour beyond the default
-model name — any OpenAI-compatible local model will work.
+In LM Studio, load a model, open the local server tab, and start the server.
+The default `model = "auto"` asks `/v1/models` and uses the first loaded
+model advertised by the server. If you want to pin a model explicitly, replace
+`auto` with the exact model id shown by LM Studio.
+
+Check the connection before running an agent task:
+
+```bash
+shardcoder llm-check
+```
+
+ShardCoder doesn't bake in model-specific behaviour — any OpenAI-compatible
+local model will work.
 
 ## Index a repository
 

@@ -65,6 +65,10 @@ DEFAULT_DB_NAME = "shardcoder.db"
 # producing length-truncated output.
 MAX_CONTINUATIONS_PER_SUBTASK = 8
 
+# Non-context prompt text, chat role overhead, and rough tokenizer drift.
+PROMPT_CONTEXT_HEADROOM_TOKENS = 1024
+MIN_CONTEXT_PACK_TOKENS = 512
+
 
 @dataclass
 class SubtaskOutcome:
@@ -121,6 +125,14 @@ class Agent:
     def _emit(self, msg: str) -> None:
         if self._log_fn is not None:
             self._log_fn(msg)
+
+    def _context_pack_token_budget(self) -> int:
+        available = (
+            self.config.llm.max_context_tokens
+            - self.config.llm.max_output_tokens
+            - PROMPT_CONTEXT_HEADROOM_TOKENS
+        )
+        return max(MIN_CONTEXT_PACK_TOKENS, available)
 
     # ------------------------------------------------------------------
     # LLM helpers
@@ -760,6 +772,7 @@ class Agent:
             web_notes=web_notes,
             memory=memory_text,
             validation=validation_text,
+            max_tokens=self._context_pack_token_budget(),
         )
 
     def _ask_for_patch(

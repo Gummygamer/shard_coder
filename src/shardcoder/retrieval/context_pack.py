@@ -128,6 +128,7 @@ def build_context_pack(
     memory: str = "",
     validation: str = "",
     max_snippet_lines: int = 80,
+    max_tokens: int | None = None,
 ) -> ContextPack:
     """Build a context pack constrained to the configured budgets.
 
@@ -191,16 +192,15 @@ def build_context_pack(
 
     # Apply a global cap using BudgetManager so that critical sections (task,
     # constraints) stay reserved.
-    budget = BudgetManager(
-        max_tokens=(
-            config.max_summary_tokens
-            + config.max_snippet_tokens
-            + config.max_web_context_tokens
-            + config.max_memory_tokens
-            + config.max_validation_tokens
-            + 256  # task + constraints headroom
-        )
+    configured_budget = (
+        config.max_summary_tokens
+        + config.max_snippet_tokens
+        + config.max_web_context_tokens
+        + config.max_memory_tokens
+        + config.max_validation_tokens
+        + 256  # task + constraints headroom
     )
+    budget = BudgetManager(max_tokens=max_tokens or configured_budget)
     budget.add("task", f"TASK:\n{task}", reserved=True)
     if pack.constraints:
         budget.add(
