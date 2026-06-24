@@ -59,7 +59,7 @@ edit `[llm]` to point at the server you started.
 base_url = "http://localhost:1234/v1"
 model = "auto"
 max_context_tokens = 8192
-max_output_tokens = 1024
+max_output_tokens = 2048
 temperature = 0.1
 ```
 
@@ -67,6 +67,8 @@ In LM Studio, load a model, open the local server tab, and start the server.
 The default `model = "auto"` asks `/v1/models` and uses the first loaded
 model advertised by the server. If you want to pin a model explicitly, replace
 `auto` with the exact model id shown by LM Studio.
+If LM Studio still stops at 1024 tokens, raise the server preset's response
+token limit to match `max_output_tokens`.
 
 Check the connection before running an agent task:
 

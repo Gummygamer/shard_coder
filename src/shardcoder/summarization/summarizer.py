@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from ..indexing.scanner import FileRecord, detect_language
+from ..indexing.scanner import FileRecord
 from ..indexing.symbols import SymbolReport, extract_symbols
 from ..llm.client import ChatMessage, LLMClient, LLMError
 from ..prompting.templates import file_summary_prompt

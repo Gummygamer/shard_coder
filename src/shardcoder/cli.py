@@ -116,6 +116,7 @@ def _run_interactive(
             tbl.add_row("Summarised files", str(len(summaries)))
             tbl.add_row("Local model URL", a.config.llm.base_url)
             tbl.add_row("Default model", a.config.llm.model)
+            tbl.add_row("Max output tokens", str(a.config.llm.max_output_tokens))
             console.print(tbl)
             continue
 
@@ -128,6 +129,10 @@ def _run_interactive(
 
 def _verbose_log(msg: str) -> None:
     console.print(f"[dim]{msg}[/dim]")
+
+
+def _progress_log(msg: str) -> None:
+    console.print(f"[cyan]{msg}[/cyan]")
 
 
 def _build_agent(
@@ -148,7 +153,7 @@ def _build_agent(
         console.print(f"[red]Configuration error:[/red] {exc}")
         raise typer.Exit(2)
     llm = OpenAICompatibleClient(config.llm) if use_llm else None
-    log = _verbose_log if verbose else None
+    log = _verbose_log if verbose else _progress_log
     return Agent(repo_root=repo, config=config, llm=llm, log=log)
 
 
@@ -227,6 +232,8 @@ def cmd_plan(
     """Show the JSON plan the model would execute for *task*."""
     agent = _build_agent(repo, config)
     result = agent.plan(task)
+    if result.fallback_reason:
+        console.print(f"[yellow]planner fallback:[/yellow] {result.fallback_reason}")
     table = Table(title=f"Plan ({'fallback' if result.fallback_used else 'model'})")
     table.add_column("ID")
     table.add_column("Goal")
@@ -342,6 +349,7 @@ def cmd_status(
     table.add_row("Summarised files", str(len(summaries)))
     table.add_row("Local model URL", agent.config.llm.base_url)
     table.add_row("Default model", agent.config.llm.model)
+    table.add_row("Max output tokens", str(agent.config.llm.max_output_tokens))
     table.add_row("Web backend", agent.config.web.backend)
     table.add_row("Web enabled", str(agent.config.web.enabled))
     console.print(table)
@@ -389,6 +397,7 @@ def cmd_llm_check(
     table.add_row("Base URL", info.base_url)
     table.add_row("Configured model", loaded.llm.model)
     table.add_row("Selected model", info.selected_model)
+    table.add_row("Max output tokens", str(loaded.llm.max_output_tokens))
     table.add_row("Available models", ", ".join(info.models) or "(none)")
     if chat:
         table.add_row("Chat response", chat_text or "(empty)")
@@ -439,6 +448,9 @@ def _render_report(report: AgentReport, *, verbose: bool = False) -> None:
             console.print(
                 f"[yellow]Model returned NO_PATCH:[/yellow] {outcome.no_patch_reason}"
             )
+
+        if outcome.llm_error:
+            console.print(f"[red]LLM error:[/red] {outcome.llm_error}")
 
         if outcome.validation and outcome.validation.errors:
             for err in outcome.validation.errors:

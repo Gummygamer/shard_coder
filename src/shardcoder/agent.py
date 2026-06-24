@@ -82,6 +82,7 @@ class SubtaskOutcome:
     command_result: CommandResult | None = None
     iterations: int = 0
     no_patch_reason: str = ""
+    llm_error: str = ""
     used_external_docs: bool = False
     external_sources: list[str] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
@@ -93,6 +94,7 @@ class SubtaskOutcome:
 class AgentReport:
     task: str
     plan_used_fallback: bool
+    plan_fallback_reason: str = ""
     outcomes: list[SubtaskOutcome] = field(default_factory=list)
     files_changed: list[str] = field(default_factory=list)
     used_external_docs: bool = False
@@ -273,6 +275,10 @@ class Agent:
             )
 
         src = "fallback" if planner_result.fallback_used else "model"
+        if planner_result.fallback_reason:
+            msg = f"planner fallback: {planner_result.fallback_reason}"
+            warnings.append(msg)
+            self._emit(msg)
         self._emit(f"Plan ({src}): {len(plan.subtasks)} subtask(s)")
         for st in plan.subtasks:
             self._emit(f"  {st.id}: {st.goal}")
@@ -281,6 +287,7 @@ class Agent:
         report = AgentReport(
             task=task,
             plan_used_fallback=planner_result.fallback_used,
+            plan_fallback_reason=planner_result.fallback_reason,
             dry_run=is_dry_run,
         )
 
@@ -357,6 +364,13 @@ class Agent:
                     warnings.append(report.stop_reason)
                     break
 
+            if outcome.llm_error:
+                report.stop_reason = (
+                    f"local model error on subtask {subtask.id}: {outcome.llm_error}"
+                )
+                warnings.append(report.stop_reason)
+                break
+
             # Track consecutive hard-failures only for original subtasks.
             # Continuation failures re-enqueue a retry rather than aborting.
             if not is_continuation:
@@ -432,6 +446,8 @@ class Agent:
     @staticmethod
     def _subtask_hard_failed(outcome: SubtaskOutcome) -> bool:
         """True when the subtask exhausted its iterations without success."""
+        if outcome.llm_error:
+            return True
         if outcome.no_patch_reason:
             return False
         if outcome.validation is None or not outcome.validation.ok:
@@ -447,6 +463,8 @@ class Agent:
     @staticmethod
     def _failure_stop_reason(outcome: SubtaskOutcome) -> str:
         prefix = f"subtask {outcome.subtask.id} failed"
+        if outcome.llm_error:
+            return f"{prefix}: local model error — {outcome.llm_error}"
         if outcome.validation and outcome.validation.errors:
             return f"{prefix}: {'; '.join(outcome.validation.errors)}"
         if outcome.apply_result and outcome.apply_result.errors:
@@ -524,15 +542,25 @@ class Agent:
 
         for iteration in range(1, self.config.agent.max_iterations + 1):
             outcome.iterations = iteration
-            self._emit(f"[{subtask.id}] Iteration {iteration}: calling model for patch...")
+            self._emit(
+                f"[{subtask.id}] Iteration {iteration}: calling model for patch "
+                f"(max_output_tokens={self.config.llm.max_output_tokens})..."
+            )
             if is_continuation:
-                patch_text, finish_reason = self._ask_for_continuation(
+                patch_text, finish_reason, llm_error = self._ask_for_continuation(
                     subtask, context_pack
                 )
             else:
-                patch_text, finish_reason = self._ask_for_patch(
+                patch_text, finish_reason, llm_error = self._ask_for_patch(
                     subtask, context_pack, validation_command
                 )
+            if llm_error:
+                outcome.llm_error = llm_error
+                outcome.notes.append(f"local model error: {llm_error}")
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: local model error — {llm_error}"
+                )
+                break
             outcome.patch_text = patch_text
             truncated = finish_reason == "length"
 
@@ -656,6 +684,11 @@ class Agent:
                 outcome.truncated = True
                 outcome.continuation_subtask = self._build_continuation_subtask(
                     subtask, validation_result.diffs
+                )
+                outcome.notes.append(
+                    f"iteration {iteration}: model hit max_output_tokens="
+                    f"{self.config.llm.max_output_tokens}; applied safe partial "
+                    f"patch and queued continuation {outcome.continuation_subtask.id}"
                 )
                 self._emit(
                     f"[{subtask.id}] Iteration {iteration}: output truncated; "
@@ -827,9 +860,9 @@ class Agent:
 
     def _ask_for_patch(
         self, subtask: Subtask, pack: ContextPack, validation_command: str
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str]:
         if self.llm is None:
-            return "NO_PATCH: no LLM client configured", None
+            return "", None, "no LLM client configured"
         try:
             result = self.llm.chat(
                 [
@@ -844,13 +877,13 @@ class Agent:
                 temperature=0.0,
                 max_tokens=self.config.llm.max_output_tokens,
             )
-            return result.text, result.finish_reason
+            return result.text, result.finish_reason, ""
         except LLMError as exc:
-            return f"NO_PATCH: local model error — {exc}", None
+            return "", None, str(exc)
 
     def _ask_for_continuation(
         self, subtask: Subtask, pack: ContextPack
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str]:
         """Ask the model to extend a partially-written file.
 
         ``subtask.likely_files[0]`` is the file we're continuing. We read its
@@ -858,7 +891,7 @@ class Agent:
         continuation prompt that demands an append-only edit-style diff.
         """
         if self.llm is None:
-            return "NO_PATCH: no LLM client configured", None
+            return "", None, "no LLM client configured"
 
         file_path = subtask.likely_files[0] if subtask.likely_files else ""
         full_path = self.repo_root / file_path if file_path else None
@@ -899,9 +932,9 @@ class Agent:
                 temperature=0.0,
                 max_tokens=self.config.llm.max_output_tokens,
             )
-            return result.text, result.finish_reason
+            return result.text, result.finish_reason, ""
         except LLMError as exc:
-            return f"NO_PATCH: local model error — {exc}", None
+            return "", None, str(exc)
 
     def _ask_for_repair(
         self,
@@ -909,9 +942,9 @@ class Agent:
         pack: ContextPack,
         previous_patch: str,
         failure_summary: str,
-    ) -> tuple[str, str | None]:
+    ) -> tuple[str, str | None, str]:
         if self.llm is None:
-            return "NO_PATCH: no LLM client configured", None
+            return "", None, "no LLM client configured"
         try:
             result = self.llm.chat(
                 [
@@ -926,9 +959,9 @@ class Agent:
                 temperature=0.0,
                 max_tokens=self.config.llm.max_output_tokens,
             )
-            return result.text, result.finish_reason
+            return result.text, result.finish_reason, ""
         except LLMError as exc:
-            return f"NO_PATCH: local model error — {exc}", None
+            return "", None, str(exc)
 
     def _analyse_failure(self, failure_summary: str):
         if self.llm is None:
@@ -989,7 +1022,11 @@ class Agent:
                 ),
                 patch_summary=("NO_PATCH: " + outcome.no_patch_reason)
                 if outcome.no_patch_reason
-                else outcome.patch_text[:200],
+                else (
+                    "LLM_ERROR: " + outcome.llm_error
+                    if outcome.llm_error
+                    else outcome.patch_text[:200]
+                ),
                 validation=(
                     outcome.command_result.command + (" OK" if outcome.command_result.ok else " FAIL")
                 )

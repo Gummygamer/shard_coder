@@ -10,11 +10,9 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-import pytest
-
 from shardcoder.agent import Agent
 from shardcoder.config import AgentConfig, ShardCoderConfig
-from shardcoder.llm.client import ChatResult
+from shardcoder.llm.client import ChatResult, LLMError
 
 
 def _plan(*subtask_specs: tuple[str, str, str]) -> dict:
@@ -67,7 +65,7 @@ class StubLLM:
 
     model = "stub"
 
-    def __init__(self, *, plan: dict, patches: list):
+    def __init__(self, *, plan: dict | BaseException, patches: list):
         self._plan = plan
         self._patches = list(patches)
         self.plan_calls = 0
@@ -77,10 +75,14 @@ class StubLLM:
         user = messages[-1].content
         if "Decompose the user task" in user:
             self.plan_calls += 1
+            if isinstance(self._plan, BaseException):
+                raise self._plan
             return ChatResult(text=json.dumps(self._plan))
         if any(marker in user for marker in _PATCH_PROMPT_MARKERS):
             self.patch_calls += 1
             entry = self._patches[self.patch_calls - 1]
+            if isinstance(entry, BaseException):
+                raise entry
             if isinstance(entry, tuple):
                 text, finish_reason = entry
             else:
@@ -159,6 +161,53 @@ def test_no_patch_stops_loop_immediately(tmp_path: Path) -> None:
     assert len(report.outcomes) == 1
     assert report.outcomes[0].no_patch_reason
     assert "NO_PATCH on subtask T1" in report.stop_reason
+
+
+def test_llm_error_is_reported_separately_from_no_patch(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path)
+    plan = _plan(
+        ("T1", "edit alpha", "alpha.py"),
+        ("T2", "edit beta", "beta.py"),
+    )
+    llm = StubLLM(
+        plan=plan,
+        patches=[
+            LLMError("Local model server timed out after 120s."),
+            _diff("beta.py", "b = 1", "b = 2"),
+        ],
+    )
+    agent = _agent(repo, llm)
+
+    report = agent.run_edit("two-step task", allow_dirty=True)
+
+    assert llm.patch_calls == 1
+    assert len(report.outcomes) == 1
+    outcome = report.outcomes[0]
+    assert outcome.llm_error == "Local model server timed out after 120s."
+    assert not outcome.no_patch_reason
+    assert outcome.validation is None
+    assert "local model error on subtask T1" in report.stop_reason
+    assert "NO_PATCH" not in report.stop_reason
+
+
+def test_planner_llm_error_reports_fallback_reason(tmp_path: Path) -> None:
+    repo = _build_repo(tmp_path)
+    llm = StubLLM(
+        plan=LLMError("Local model server timed out after 120s."),
+        patches=[_diff("alpha.py", "a = 1", "a = 2")],
+    )
+    agent = _agent(repo, llm)
+
+    report = agent.run_edit("edit alpha.py", allow_dirty=True)
+
+    assert llm.plan_calls == 1
+    assert llm.patch_calls == 1
+    assert report.plan_used_fallback is True
+    assert report.plan_fallback_reason == (
+        "local model error — Local model server timed out after 120s."
+    )
+    assert any("planner fallback" in warning for warning in report.warnings)
+    assert report.stop_reason == ""
 
 
 def test_two_consecutive_validation_failures_stop_loop(tmp_path: Path) -> None:
@@ -257,6 +306,7 @@ def test_truncated_new_file_queues_continuation(tmp_path: Path) -> None:
     assert len(report.outcomes) == 2
     assert report.outcomes[0].truncated is True
     assert report.outcomes[0].continuation_subtask is not None
+    assert any("queued continuation" in note for note in report.outcomes[0].notes)
     assert report.outcomes[1].subtask.id == "T1-cont1"
     assert "foo.py" in report.files_changed
     # Final file has both halves stitched together.

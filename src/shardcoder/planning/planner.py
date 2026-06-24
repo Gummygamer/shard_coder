@@ -18,6 +18,7 @@ from ..prompting.templates import task_decomposition_prompt
 class PlannerResult:
     plan: Plan
     fallback_used: bool
+    fallback_reason: str = ""
 
 
 def fallback_plan(task: str) -> Plan:
@@ -51,7 +52,11 @@ def make_plan(
 ) -> PlannerResult:
     """Ask the model for a JSON plan, falling back to a single subtask."""
     if llm is None:
-        return PlannerResult(plan=fallback_plan(task), fallback_used=True)
+        return PlannerResult(
+            plan=fallback_plan(task),
+            fallback_used=True,
+            fallback_reason="no LLM client configured",
+        )
 
     prompt = task_decomposition_prompt(task, repo_summary_text)
     try:
@@ -69,10 +74,18 @@ def make_plan(
             temperature=0.0,
             max_tokens=600,
         )
-    except LLMError:
-        return PlannerResult(plan=fallback_plan(task), fallback_used=True)
+    except LLMError as exc:
+        return PlannerResult(
+            plan=fallback_plan(task),
+            fallback_used=True,
+            fallback_reason=f"local model error — {exc}",
+        )
 
     plan = parse_plan(result.text)
     if plan is None or not plan.subtasks:
-        return PlannerResult(plan=fallback_plan(task), fallback_used=True)
+        return PlannerResult(
+            plan=fallback_plan(task),
+            fallback_used=True,
+            fallback_reason="model produced no valid plan",
+        )
     return PlannerResult(plan=plan, fallback_used=False)
