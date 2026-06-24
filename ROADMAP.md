@@ -42,7 +42,7 @@ All of the following are implemented and tested:
 | `summarization/store.py`            | Done   | SQLite (files / symbols / imports / summaries). |
 | `summarization/summarizer.py`       | Done   | LLM summary with deterministic fallback. |
 | `retrieval/{ranking,retriever,context_pack}.py` | Done | Hybrid retrieval + budget-aware pack assembly. |
-| `planning/planner.py`               | Done   | Strict-JSON plan, single-subtask fallback. |
+| `planning/planner.py`               | Done   | Strict-JSON plan, deterministic fallback; broad creation tasks are sharded. |
 | `prompting/{templates,schemas}.py`  | Done   | All prompts + Pydantic validators. |
 | `editing/{diff_utils,patcher}.py`   | Done   | Pure-Python parser; rejects prose, ignored paths, binaries, oversized deletions. |
 | `execution/runner.py`               | Done   | subprocess + timeout + failing-path detection. |

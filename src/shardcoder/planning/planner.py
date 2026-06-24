@@ -1,12 +1,14 @@
 """Task decomposition.
 
 The planner asks the local model for a strict JSON plan; if that fails,
-it falls back to a single deterministic subtask so the rest of the agent
-can still make progress.
+it falls back to a deterministic plan so the rest of the agent can still
+make progress. Broad creation tasks are split into a few small shards so
+patch generation does not have to fit an entire app in one completion.
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 
 from ..llm.client import ChatMessage, LLMClient, LLMError
@@ -21,8 +23,50 @@ class PlannerResult:
     fallback_reason: str = ""
 
 
-def fallback_plan(task: str) -> Plan:
-    """Build a single-subtask plan from the user request alone."""
+_REPO_FILE_RE = re.compile(r"^\s*-\s+(.+?)\s+\([^)]+\)\s*$", re.M)
+_CREATE_VERBS = {
+    "add",
+    "build",
+    "create",
+    "generate",
+    "implement",
+    "make",
+    "scaffold",
+    "write",
+}
+_BROAD_TARGETS = {
+    "app",
+    "application",
+    "clone",
+    "dashboard",
+    "experience",
+    "feature",
+    "game",
+    "page",
+    "site",
+    "tool",
+    "ui",
+    "website",
+}
+
+
+def fallback_plan(task: str, repo_summary_text: str = "") -> Plan:
+    """Build a deterministic fallback plan from the user request.
+
+    Narrow tasks intentionally stay as one subtask. Broad "create an app"
+    style requests are decomposed because a single fallback subtask tends
+    to produce long prompts and long model completions.
+    """
+    if _is_pacman_task(task):
+        return _pacman_fallback_plan(task, repo_summary_text)
+    if _is_browser_game_task(task):
+        return _browser_game_fallback_plan(task, repo_summary_text)
+    if _is_broad_creation_task(task):
+        return _broad_creation_fallback_plan(task, repo_summary_text)
+    return _single_subtask_fallback_plan(task)
+
+
+def _single_subtask_fallback_plan(task: str) -> Plan:
     return Plan(
         task=task,
         assumptions=[],
@@ -44,16 +88,302 @@ def fallback_plan(task: str) -> Plan:
     )
 
 
+def _pacman_fallback_plan(task: str, repo_summary_text: str) -> Plan:
+    html, css, script = _browser_game_files(repo_summary_text)
+    return Plan(
+        task=task,
+        assumptions=[
+            "Use the existing browser entry points when present; otherwise "
+            "create a plain HTML/CSS/JavaScript implementation.",
+            "Keep each fallback subtask small enough for a local model to emit a focused diff.",
+        ],
+        subtasks=[
+            Subtask(
+                id="T1",
+                goal=(
+                    f"Create or update the browser game shell for: {task}. "
+                    "Add the board/canvas container, score/lives/status HUD, "
+                    "restart control, stylesheet link, and script entry point."
+                ),
+                reason="Set up the visible game surface and entry points first.",
+                search_queries=["index", "html", "canvas", "game shell"],
+                likely_files=[html, css, script],
+                edit_scope="small",
+                validation="",
+                needs_external_docs=False,
+                external_doc_reason="",
+            ),
+            Subtask(
+                id="T2",
+                goal=(
+                    f"Implement the maze layout, render loop, pellets, score state, "
+                    f"and player drawing for: {task}."
+                ),
+                reason="Core Pac-Man state and rendering are independent of enemy behavior.",
+                search_queries=["maze", "pellets", "render loop", script],
+                likely_files=[script],
+                edit_scope="medium",
+                validation="",
+                needs_external_docs=False,
+                external_doc_reason="",
+            ),
+            Subtask(
+                id="T3",
+                goal=(
+                    f"Add keyboard/touch controls, legal movement through the maze, "
+                    f"pellet collection, win state, loss state, and restart behavior "
+                    f"for: {task}."
+                ),
+                reason="Player interaction and game-state transitions should be tested together.",
+                search_queries=["controls", "movement", "collision", "restart"],
+                likely_files=[script, html],
+                edit_scope="medium",
+                validation="",
+                needs_external_docs=False,
+                external_doc_reason="",
+            ),
+            Subtask(
+                id="T4",
+                goal=(
+                    f"Add ghost movement, player/ghost collisions, responsive styling, "
+                    f"and final browser polish for: {task}."
+                ),
+                reason="Enemy behavior and polish can be layered onto the playable loop.",
+                search_queries=["ghost", "collision", "responsive", css],
+                likely_files=[script, css, html],
+                edit_scope="medium",
+                validation="",
+                needs_external_docs=False,
+                external_doc_reason="",
+            ),
+        ],
+        stop_conditions=[
+            "The game runs in a browser without a build step.",
+            "The player can move, collect pellets, collide with ghosts, win, lose, and restart.",
+        ],
+        risks=[
+            "Fallback plan assumes a browser-based game because no valid model plan was available.",
+        ],
+    )
+
+
+def _browser_game_fallback_plan(task: str, repo_summary_text: str) -> Plan:
+    html, css, script = _browser_game_files(repo_summary_text)
+    return Plan(
+        task=task,
+        assumptions=[
+            "Use the existing browser entry points when present; otherwise "
+            "create a plain HTML/CSS/JavaScript implementation.",
+            "Split gameplay, controls, and polish into separate model calls.",
+        ],
+        subtasks=[
+            Subtask(
+                id="T1",
+                goal=(
+                    f"Create or update the browser game shell for: {task}. "
+                    "Add the main game surface, HUD, controls/restart affordance, "
+                    "stylesheet link, and script entry point."
+                ),
+                reason="Establish the visible shell before implementing gameplay.",
+                search_queries=["index", "html", "game shell"],
+                likely_files=[html, css, script],
+                edit_scope="small",
+            ),
+            Subtask(
+                id="T2",
+                goal=(
+                    f"Implement the core game state, render loop, and main entities "
+                    f"for: {task}."
+                ),
+                reason="Keep core game mechanics in one focused script change.",
+                search_queries=["game state", "render loop", script],
+                likely_files=[script],
+                edit_scope="medium",
+            ),
+            Subtask(
+                id="T3",
+                goal=(
+                    f"Add player controls, collision/rules, scoring or progress, "
+                    f"win/loss state, and restart behavior for: {task}."
+                ),
+                reason="Interaction and game-state transitions belong together.",
+                search_queries=["controls", "collision", "score", "restart"],
+                likely_files=[script, html],
+                edit_scope="medium",
+            ),
+            Subtask(
+                id="T4",
+                goal=(
+                    f"Add responsive styling, polish, and any final browser fixes "
+                    f"for: {task}."
+                ),
+                reason="Visual polish should follow the functional loop.",
+                search_queries=["responsive", "style", css],
+                likely_files=[css, html, script],
+                edit_scope="small",
+            ),
+        ],
+        stop_conditions=[
+            "The game runs in a browser without a build step.",
+            "The main interaction loop, scoring/progress, ending state, and restart work.",
+        ],
+        risks=[
+            "Fallback plan assumes a browser-based game because no valid model plan was available.",
+        ],
+    )
+
+
+def _broad_creation_fallback_plan(task: str, repo_summary_text: str) -> Plan:
+    likely_files = _likely_repo_files(repo_summary_text, limit=4)
+    return Plan(
+        task=task,
+        assumptions=[
+            "Prefer the repository's existing stack and entry points when they are "
+            "visible in the index.",
+            "If no suitable entry point exists, create the minimal files needed for "
+            "the requested feature.",
+        ],
+        subtasks=[
+            Subtask(
+                id="T1",
+                goal=(
+                    f"Establish the smallest project entry points needed for: {task}. "
+                    "Create or update only the files required to make later changes concrete."
+                ),
+                reason="Broad creation tasks need a concrete scaffold before deeper behavior.",
+                search_queries=["entry point", "main", "index", *likely_files[:2]],
+                likely_files=likely_files,
+                edit_scope="small",
+            ),
+            Subtask(
+                id="T2",
+                goal=(
+                    f"Implement the core behavior and data/state model for: {task}. "
+                    "Keep the diff focused on the primary workflow."
+                ),
+                reason="Core behavior should be isolated from polish and edge states.",
+                search_queries=["core", "state", "workflow", *likely_files[:2]],
+                likely_files=likely_files,
+                edit_scope="medium",
+            ),
+            Subtask(
+                id="T3",
+                goal=(
+                    f"Add user-visible states, error/empty handling, and completion "
+                    f"behavior for: {task}."
+                ),
+                reason="Secondary states can be layered after the core path exists.",
+                search_queries=["error", "empty", "complete", *likely_files[:2]],
+                likely_files=likely_files,
+                edit_scope="medium",
+            ),
+            Subtask(
+                id="T4",
+                goal=(
+                    f"Add final integration, styling or ergonomics, and lightweight "
+                    f"validation updates for: {task}."
+                ),
+                reason="Finish with integration and validation after behavior lands.",
+                search_queries=["test", "validation", "style", *likely_files[:2]],
+                likely_files=likely_files,
+                edit_scope="small",
+            ),
+        ],
+        stop_conditions=[
+            "Validation passes.",
+            "The requested workflow can be exercised end to end.",
+        ],
+        risks=[
+            "Fallback plan was generated heuristically; verify file choices against "
+            "the repository stack.",
+        ],
+    )
+
+
+def _is_pacman_task(task: str) -> bool:
+    normalized = _normalize_task(task)
+    compact = normalized.replace(" ", "")
+    return "pacman" in compact or "pac man" in normalized
+
+
+def _is_browser_game_task(task: str) -> bool:
+    tokens = set(_normalize_task(task).split())
+    return bool(tokens & _CREATE_VERBS and {"arcade", "game"} & tokens)
+
+
+def _is_broad_creation_task(task: str) -> bool:
+    tokens = set(_normalize_task(task).split())
+    return bool(tokens & _CREATE_VERBS and tokens & _BROAD_TARGETS)
+
+
+def _normalize_task(task: str) -> str:
+    return " ".join(re.findall(r"[a-z0-9]+", task.lower()))
+
+
+def _repo_files(repo_summary_text: str) -> list[str]:
+    return [match.group(1).strip() for match in _REPO_FILE_RE.finditer(repo_summary_text)]
+
+
+def _likely_repo_files(repo_summary_text: str, *, limit: int) -> list[str]:
+    files = _repo_files(repo_summary_text)
+    if not files:
+        return []
+
+    preferred_suffixes = (
+        ".py",
+        ".js",
+        ".ts",
+        ".jsx",
+        ".tsx",
+        ".html",
+        ".css",
+        ".rs",
+        ".go",
+    )
+    preferred = [path for path in files if path.endswith(preferred_suffixes)]
+    return (preferred or files)[:limit]
+
+
+def _browser_game_files(repo_summary_text: str) -> tuple[str, str, str]:
+    files = _repo_files(repo_summary_text)
+    html = _pick_file(files, ("index.html",), (".html",)) or "index.html"
+    css = _pick_file(files, ("style.css", "styles.css"), (".css",)) or "style.css"
+    script = (
+        _pick_file(
+            files,
+            ("game.js", "main.js", "app.js", "src/game.js", "src/main.js"),
+            (".js", ".ts", ".jsx", ".tsx"),
+        )
+        or "game.js"
+    )
+    return html, css, script
+
+
+def _pick_file(
+    files: list[str],
+    exact_names: tuple[str, ...],
+    suffixes: tuple[str, ...],
+) -> str | None:
+    exact_lookup = {name.lower(): name for name in exact_names}
+    for path in files:
+        if path.lower() in exact_lookup:
+            return path
+    for path in files:
+        if path.endswith(suffixes):
+            return path
+    return None
+
+
 def make_plan(
     task: str,
     repo_summary_text: str,
     *,
     llm: LLMClient | None = None,
 ) -> PlannerResult:
-    """Ask the model for a JSON plan, falling back to a single subtask."""
+    """Ask the model for a JSON plan, falling back to a deterministic plan."""
     if llm is None:
         return PlannerResult(
-            plan=fallback_plan(task),
+            plan=fallback_plan(task, repo_summary_text),
             fallback_used=True,
             fallback_reason="no LLM client configured",
         )
@@ -76,7 +406,7 @@ def make_plan(
         )
     except LLMError as exc:
         return PlannerResult(
-            plan=fallback_plan(task),
+            plan=fallback_plan(task, repo_summary_text),
             fallback_used=True,
             fallback_reason=f"local model error — {exc}",
         )
@@ -84,7 +414,7 @@ def make_plan(
     plan = parse_plan(result.text)
     if plan is None or not plan.subtasks:
         return PlannerResult(
-            plan=fallback_plan(task),
+            plan=fallback_plan(task, repo_summary_text),
             fallback_used=True,
             fallback_reason="model produced no valid plan",
         )

@@ -61,6 +61,7 @@ model = "auto"
 max_context_tokens = 8192
 max_output_tokens = 2048
 temperature = 0.1
+timeout_seconds = 120
 ```
 
 In LM Studio, load a model, open the local server tab, and start the server.
@@ -124,11 +125,11 @@ shardcoder edit "fix the failing login test"
 shardcoder edit "fix the FastAPI lifespan warning" --web
 ```
 
-The MVP executes the first subtask of the plan, builds a focused context
-pack, asks the model for a unified diff, validates and (if allowed)
-applies it, then runs the configured validation command. On failure it
-retrieves a focused context for the failure and asks for a repair patch,
-up to `max_iterations`.
+The edit workflow executes every subtask in the plan, builds a focused
+context pack for each step, asks the model for a unified diff, validates
+and (if allowed) applies it, then runs the configured validation command.
+On failure it retrieves a focused context for the failure and asks for a
+repair patch, up to `max_iterations`.
 
 ## Dry-run mode
 
@@ -180,7 +181,9 @@ in your own backend by implementing `external_context.web_search.WebBackend`.
 - Token counts are approximate (heuristic ~4 chars per token).
 - Embedding-based retrieval is not bundled — keyword/symbol/path/import
   retrieval only.
-- Only the first subtask of a plan is executed in the MVP.
+- Planner fallback is heuristic. When the model cannot produce valid JSON,
+  broad creation tasks are split into deterministic shards, but the chosen
+  files still need review against the repository's intended stack.
 - The bundled web backend is a safe stub; you must wire up your own
   search/fetch backend to actually retrieve external pages.
 
