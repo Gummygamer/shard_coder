@@ -16,10 +16,13 @@ class InvalidPlanLLM:
 def test_pacman_fallback_plan_is_split_into_browser_game_shards() -> None:
     plan = fallback_plan("Create a Pac-man clone", "(repository not yet indexed)")
 
-    assert [subtask.id for subtask in plan.subtasks] == ["T1", "T2", "T3", "T4"]
-    assert plan.subtasks[0].likely_files == ["index.html", "style.css", "game.js"]
+    assert [subtask.id for subtask in plan.subtasks] == ["T1", "T2", "T3", "T4", "T5"]
+    assert plan.subtasks[0].likely_files == ["index.html"]
+    assert "only the HTML" in plan.subtasks[0].goal
+    assert plan.subtasks[1].likely_files == ["game.js"]
     assert any("ghost" in subtask.goal.lower() for subtask in plan.subtasks)
     assert any("pellet" in subtask.goal.lower() for subtask in plan.subtasks)
+    assert any("responsive" in subtask.goal.lower() for subtask in plan.subtasks)
 
 
 def test_broad_fallback_prefers_existing_browser_entry_points() -> None:
@@ -34,11 +37,11 @@ def test_broad_fallback_prefers_existing_browser_entry_points() -> None:
     plan = fallback_plan("Build an arcade game", repo_summary)
 
     assert [subtask.id for subtask in plan.subtasks] == ["T1", "T2", "T3", "T4"]
-    assert plan.subtasks[0].likely_files == [
-        "public/index.html",
-        "src/styles.css",
-        "src/main.ts",
-    ]
+    assert plan.subtasks[0].likely_files == ["public/index.html"]
+    assert "src/styles.css" in plan.subtasks[0].goal
+    assert "src/main.ts" in plan.subtasks[0].goal
+    assert plan.subtasks[1].likely_files == ["src/main.ts"]
+    assert plan.subtasks[3].likely_files == ["src/styles.css", "public/index.html"]
 
 
 def test_invalid_model_plan_uses_heuristic_pacman_fallback() -> None:
@@ -50,8 +53,8 @@ def test_invalid_model_plan_uses_heuristic_pacman_fallback() -> None:
 
     assert result.fallback_used is True
     assert result.fallback_reason == "model produced no valid plan"
-    assert len(result.plan.subtasks) == 4
-    assert result.plan.subtasks[0].likely_files == ["index.html", "style.css", "game.js"]
+    assert len(result.plan.subtasks) == 5
+    assert result.plan.subtasks[0].likely_files == ["index.html"]
 
 
 def test_narrow_fallback_plan_stays_single_subtask() -> None:

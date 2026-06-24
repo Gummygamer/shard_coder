@@ -316,6 +316,47 @@ def test_truncated_new_file_queues_continuation(tmp_path: Path) -> None:
     assert report.stop_reason == ""
 
 
+def test_empty_truncated_continuation_stops_without_requeue(tmp_path: Path) -> None:
+    """An exhausted continuation that only gets empty length-truncated output
+    should stop with an actionable message instead of chaining T1-cont2, etc."""
+    repo = _build_repo(tmp_path)
+    plan = _plan(("T1", "create new module foo.py", "foo.py"))
+
+    partial_new_file = (
+        "--- /dev/null\n"
+        "+++ b/foo.py\n"
+        "@@ -0,0 +1,2 @@\n"
+        "+def foo():\n"
+        "+    return 1\n"
+    )
+    llm = StubLLM(
+        plan=plan,
+        patches=[
+            (partial_new_file, "length"),
+            ("", "length"),
+            ("", "length"),
+        ],
+    )
+    config = ShardCoderConfig()
+    config.agent = AgentConfig(
+        max_iterations=2,
+        dry_run=False,
+        auto_apply=True,
+        auto_run_tests=False,
+    )
+    agent = Agent(repo_root=repo, config=config, llm=llm)
+
+    report = agent.run_edit("create foo.py", allow_dirty=True)
+
+    assert llm.patch_calls == 3
+    assert [outcome.subtask.id for outcome in report.outcomes] == ["T1", "T1-cont1"]
+    assert report.outcomes[1].truncated is True
+    assert report.outcomes[1].apply_result is None
+    assert "continuation T1-cont1 failed" in report.stop_reason
+    assert "max_output_tokens" in report.stop_reason
+    assert (repo / "foo.py").read_text() == "def foo():\n    return 1\n"
+
+
 def test_truncated_edit_with_removals_is_refused(tmp_path: Path) -> None:
     """A length-truncated edit-style diff that removes lines should NOT
     be applied — the loop must retry rather than corrupt the file."""

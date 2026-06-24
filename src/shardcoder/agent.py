@@ -390,6 +390,16 @@ class Agent:
                 and not outcome.no_patch_reason
                 and self._subtask_hard_failed(outcome)
             ):
+                if self._is_unproductive_truncated_continuation(outcome):
+                    report.stop_reason = (
+                        f"continuation {subtask.id} failed after repeated "
+                        "length-truncated empty or invalid model output; increase "
+                        "[llm].max_output_tokens and the model server response "
+                        "token limit, then retry the task"
+                    )
+                    warnings.append(report.stop_reason)
+                    self._emit(report.stop_reason)
+                    break
                 # Apply/validation failed for this continuation; retry it.
                 count = continuations_per_root.get(root_id, 0)
                 if count < MAX_CONTINUATIONS_PER_SUBTASK:
@@ -459,6 +469,31 @@ class Agent:
         if outcome.command_result is not None and not outcome.command_result.ok:
             return True
         return False
+
+    @staticmethod
+    def _is_unproductive_truncated_continuation(outcome: SubtaskOutcome) -> bool:
+        """True when retrying a continuation is unlikely to make progress.
+
+        ``run_subtask`` already spent its configured iterations retrying the
+        same continuation. If all we got was length-truncated non-diff output,
+        re-queueing another continuation subtask tends to burn many more model
+        calls without changing the prompt shape.
+        """
+        if "-cont" not in outcome.subtask.id:
+            return False
+        if not outcome.truncated or outcome.apply_result is not None:
+            return False
+        if outcome.validation is None or outcome.validation.ok:
+            return False
+
+        text = "\n".join([*outcome.validation.errors, *outcome.notes]).lower()
+        markers = (
+            "empty model output",
+            "does not look like a unified diff",
+            "prose detected around diff",
+            "diff parse error",
+        )
+        return any(marker in text for marker in markers)
 
     @staticmethod
     def _failure_stop_reason(outcome: SubtaskOutcome) -> str:
@@ -564,11 +599,16 @@ class Agent:
             outcome.patch_text = patch_text
             truncated = finish_reason == "length"
 
-            if patch_text.lstrip().startswith("NO_PATCH"):
+            trunc_note = " (truncated at max_output_tokens)" if truncated else ""
+            if not patch_text.strip():
+                self._emit(
+                    f"[{subtask.id}] Iteration {iteration}: "
+                    f"model returned empty output{trunc_note}"
+                )
+            elif patch_text.lstrip().startswith("NO_PATCH"):
                 self._emit(f"[{subtask.id}] Iteration {iteration}: model returned NO_PATCH")
             else:
                 nlines = patch_text.count("\n") + 1
-                trunc_note = " (truncated at max_output_tokens)" if truncated else ""
                 self._emit(
                     f"[{subtask.id}] Iteration {iteration}: "
                     f"model returned {nlines}-line diff{trunc_note}"

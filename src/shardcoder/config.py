@@ -32,7 +32,7 @@ class LLMConfig(BaseModel):
     api_key: str | None = None
     model: str = "auto"
     max_context_tokens: int = 8192
-    max_output_tokens: int = 2048
+    max_output_tokens: int = 4096
     temperature: float = 0.1
     timeout_seconds: int = 300
     timeout_retries: int = Field(default=1, ge=0)

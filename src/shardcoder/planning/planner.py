@@ -101,13 +101,15 @@ def _pacman_fallback_plan(task: str, repo_summary_text: str) -> Plan:
             Subtask(
                 id="T1",
                 goal=(
-                    f"Create or update the browser game shell for: {task}. "
+                    f"Create or update only the HTML game shell for: {task}. "
                     "Add the board/canvas container, score/lives/status HUD, "
-                    "restart control, stylesheet link, and script entry point."
+                    f"restart control, a stylesheet link to {css}, and a script "
+                    f"entry point for {script}. Do not implement game logic or "
+                    "stylesheet contents in this subtask."
                 ),
                 reason="Set up the visible game surface and entry points first.",
                 search_queries=["index", "html", "canvas", "game shell"],
-                likely_files=[html, css, script],
+                likely_files=[html],
                 edit_scope="small",
                 validation="",
                 needs_external_docs=False,
@@ -145,13 +147,26 @@ def _pacman_fallback_plan(task: str, repo_summary_text: str) -> Plan:
             Subtask(
                 id="T4",
                 goal=(
-                    f"Add ghost movement, player/ghost collisions, responsive styling, "
-                    f"and final browser polish for: {task}."
+                    f"Add ghost movement and player/ghost collisions for: {task}."
                 ),
-                reason="Enemy behavior and polish can be layered onto the playable loop.",
-                search_queries=["ghost", "collision", "responsive", css],
-                likely_files=[script, css, html],
+                reason="Enemy behavior can be layered onto the playable loop.",
+                search_queries=["ghost", "collision", script],
+                likely_files=[script],
                 edit_scope="medium",
+                validation="",
+                needs_external_docs=False,
+                external_doc_reason="",
+            ),
+            Subtask(
+                id="T5",
+                goal=(
+                    f"Add responsive styling, mobile-friendly layout, and final "
+                    f"browser polish for: {task}."
+                ),
+                reason="Visual polish should stay separate from gameplay code.",
+                search_queries=["responsive", "style", css, html],
+                likely_files=[css, html],
+                edit_scope="small",
                 validation="",
                 needs_external_docs=False,
                 external_doc_reason="",
@@ -180,13 +195,15 @@ def _browser_game_fallback_plan(task: str, repo_summary_text: str) -> Plan:
             Subtask(
                 id="T1",
                 goal=(
-                    f"Create or update the browser game shell for: {task}. "
+                    f"Create or update only the HTML game shell for: {task}. "
                     "Add the main game surface, HUD, controls/restart affordance, "
-                    "stylesheet link, and script entry point."
+                    f"a stylesheet link to {css}, and a script entry point for "
+                    f"{script}. Do not implement game logic or stylesheet "
+                    "contents in this subtask."
                 ),
                 reason="Establish the visible shell before implementing gameplay.",
                 search_queries=["index", "html", "game shell"],
-                likely_files=[html, css, script],
+                likely_files=[html],
                 edit_scope="small",
             ),
             Subtask(
@@ -219,7 +236,7 @@ def _browser_game_fallback_plan(task: str, repo_summary_text: str) -> Plan:
                 ),
                 reason="Visual polish should follow the functional loop.",
                 search_queries=["responsive", "style", css],
-                likely_files=[css, html, script],
+                likely_files=[css, html],
                 edit_scope="small",
             ),
         ],
